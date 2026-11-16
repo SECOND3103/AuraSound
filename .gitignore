@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Android and Gradle generated files
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/app/release/
+*.iml
+
+# Generated Capacitor files
+android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+
+# Build results
+*.apk
+*.aab
+*.aar
+*.ap_
+*.dex
+*.class
+
+# Signing keys and passwords
+aurasound
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+keystore.properties
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
