@@ -74,9 +74,11 @@ export class AudioPlayer {
         currentTime: this.getCurrentTime(),
         duration: this.duration
       });
-      this.emit('playstate', playing);
+      if (this._notifiedPlaying !== Boolean(playing) || this._notifiedTrackId !== this.currentTrackId) {
+        this.emit('playstate', playing);
+      }
 
-      if (this.duration > 0) {
+      if (this.duration > 0 && (this._metadataDuration !== this.duration || this._metadataTrackId !== this.currentTrackId)) {
         this.emit('loadedmetadata', this.duration);
       }
     };
@@ -89,6 +91,13 @@ export class AudioPlayer {
   }
 
   emit(event, data) {
+    if (event === 'playstate') {
+      this._notifiedPlaying = Boolean(data);
+      this._notifiedTrackId = this.currentTrackId;
+    } else if (event === 'loadedmetadata') {
+      this._metadataDuration = data;
+      this._metadataTrackId = this.currentTrackId;
+    }
     if (this.listeners[event]) {
       this.listeners[event].forEach(callback => callback(data));
     }
@@ -250,7 +259,7 @@ export class AudioPlayer {
   }
 
   startTimeUpdates() {
-    if (this.timeTimer) return;
+    if (this.timeTimer || document.visibilityState === 'hidden') return;
     this.timeTimer = window.setInterval(() => {
       if (this.paused) return;
       const currentTime = this.getCurrentTime();
@@ -266,6 +275,15 @@ export class AudioPlayer {
     if (!this.timeTimer) return;
     clearInterval(this.timeTimer);
     this.timeTimer = null;
+  }
+
+  setVisible(visible) {
+    if (!visible) {
+      this.stopTimeUpdates();
+    } else if (this.clockRunning && !this.paused) {
+      this.startTimeUpdates();
+      this.emit('timeupdate', { currentTime: this.getCurrentTime(), duration: this.duration });
+    }
   }
 
   destroy() {

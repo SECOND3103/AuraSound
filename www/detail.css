@@ -1,0 +1,203 @@
+.detail-view-open .app-header {
+  display: none;
+}
+
+.detail-view-open .content-area {
+  overflow-anchor: none;
+}
+
+.collection-detail {
+  --detail-action-size: 52px;
+  --detail-bar-height: calc(60px + var(--safe-top));
+  --detail-navigation-shift: clamp(0px, calc(var(--view-gutter) - 4px), 12px);
+  min-height: 100%;
+  padding-top: 0;
+}
+
+.collection-detail--playlist {
+  --playlist-search-space: calc(var(--detail-bar-height) + 62px);
+  min-height: calc(100% + var(--playlist-search-space));
+}
+
+.detail-navigation {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: var(--detail-action-size) minmax(0, 1fr) var(--detail-action-size);
+  align-items: center;
+  height: var(--detail-bar-height);
+  margin-inline: calc(-1 * var(--view-gutter));
+  margin-bottom: calc(-1 * var(--detail-bar-height));
+  padding: var(--safe-top) var(--view-gutter) 0;
+  pointer-events: none;
+}
+
+.detail-navigation::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--bg-dark-base);
+  background: color-mix(in srgb, var(--detail-artwork-color, var(--bg-dark-base)) 55%, var(--bg-dark-base));
+  opacity: var(--detail-collapse, 0);
+}
+
+.detail-navigation-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  opacity: var(--detail-collapse, 0);
+}
+
+.detail-navigation .btn-back,
+.detail-navigation .detail-more {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: rgb(0 0 0 / calc(.46 * (1 - var(--detail-collapse, 0))));
+  color: var(--text-primary);
+  pointer-events: auto;
+}
+
+.detail-navigation .btn-back {
+  translate: calc(-1 * var(--detail-navigation-shift) * var(--detail-collapse, 0)) 0;
+}
+
+.detail-navigation .detail-more {
+  translate: calc(var(--detail-navigation-shift) * var(--detail-collapse, 0)) 0;
+  opacity: calc(1 - var(--detail-collapse, 0));
+}
+
+.collection-detail--artist .detail-navigation .detail-more {
+  opacity: 1;
+}
+
+.detail-navigation .detail-more[inert] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.detail-nav-right {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--detail-action-size);
+  height: var(--detail-action-size);
+}
+
+.detail-navigation .btn-primary-play {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  visibility: hidden;
+  translate: var(--detail-play-x, 0px) calc(var(--detail-play-y, 0px) - 50%);
+  pointer-events: auto;
+}
+
+.collection-detail.detail-positioned .detail-navigation .btn-primary-play {
+  visibility: visible;
+}
+
+.detail-play-slot {
+  flex: 0 0 var(--detail-action-size);
+  height: var(--detail-action-size);
+}
+
+.detail-search-panel {
+  padding-bottom: 12px;
+}
+
+.detail-search-panel--above-cover {
+  min-height: var(--playlist-search-space);
+  padding-top: var(--detail-bar-height);
+}
+
+.detail-search-panel .library-search-wrapper {
+  margin: 0;
+}
+
+.collection-detail .playlist-detail-header {
+  margin-top: 0;
+  padding-top: calc(var(--safe-top) + 14px);
+}
+
+.collection-detail--playlist .playlist-cover-large {
+  transform: translateY(var(--playlist-cover-offset, 0px)) scale(var(--playlist-cover-scale, 1));
+  transform-origin: center top;
+}
+
+.collection-detail--artist .playlist-detail-header {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "cover" "info" "actions";
+  padding-top: 0;
+}
+
+.detail-artist-banner {
+  grid-area: cover;
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: clamp(240px, 72vw, 380px);
+  margin-inline: calc(-1 * var(--view-gutter));
+  overflow: hidden;
+  background: var(--bg-dark-elevated);
+  color: var(--text-muted);
+  opacity: calc(1 - var(--detail-cover-progress, 0));
+  transform: translateY(calc(30px * var(--detail-cover-progress, 0)));
+}
+
+.detail-artist-banner::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgb(0 0 0 / 22%), transparent 28%, var(--bg-dark-base));
+}
+
+.detail-artist-banner img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 40%;
+}
+
+.detail-artist-banner > .material-symbols-rounded {
+  font-size: 68px;
+}
+
+.collection-detail--artist .playlist-meta-info {
+  position: relative;
+  margin-top: -64px;
+}
+
+#view-folder-detail > .btn-back {
+  width: 44px;
+  justify-content: center;
+}
+
+@media (min-width: 700px) {
+  .detail-view-open .content-area {
+    grid-row: 1 / -1;
+  }
+  .collection-detail:not(.collection-detail--artist) .playlist-detail-header {
+    padding-top: var(--detail-bar-height);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collection-detail--playlist .playlist-cover-large,
+  .detail-artist-banner {
+    transform: none;
+  }
+}

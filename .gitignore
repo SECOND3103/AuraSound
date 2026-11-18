@@ -24,7 +24,7 @@ android/app/src/main/assets/capacitor.plugins.json
 *.class
 
 # Signing keys and passwords
-aurasound
+/aurasound
 *.jks
 *.keystore
 *.p12

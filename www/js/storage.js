@@ -39,140 +39,97 @@ export class StorageManager {
     });
   }
 
-  async saveTrack(track) {
-    const { fileBlob, ...metadata } = track || {};
-    const tx = this.db.transaction(['tracks'], 'readwrite');
-
+  runTransaction(stores, mode, operation) {
     return new Promise((resolve, reject) => {
-      tx.objectStore('tracks').put(metadata);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      const tx = this.db.transaction(stores, mode);
+      let request;
+      tx.oncomplete = () => resolve(request?.result);
+      tx.onerror = event => reject(tx.error || event.target.error || new Error('Storage operation failed'));
+      tx.onabort = () => reject(tx.error || new Error('Storage transaction aborted'));
+      try {
+        request = operation(tx);
+      } catch (error) {
+        tx.abort();
+        reject(error);
+      }
+    });
+  }
+
+  saveTrack(track) {
+    return this.saveTracks([track]);
+  }
+
+  saveTracks(tracks) {
+    return this.runTransaction(['tracks'], 'readwrite', tx => {
+      const store = tx.objectStore('tracks');
+      for (const track of tracks) {
+        const { fileBlob, ...metadata } = track || {};
+        store.put(metadata);
+      }
     });
   }
 
   async getAllTracks() {
-    const tx = this.db.transaction(['tracks'], 'readonly');
-
-    return new Promise((resolve) => {
-      const req = tx.objectStore('tracks').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-    });
+    return this.runTransaction(['tracks'], 'readonly', tx => tx.objectStore('tracks').getAll());
   }
 
   async deleteTrack(id) {
-    const tx = this.db.transaction(['tracks'], 'readwrite');
-
-    return new Promise(resolve => {
-      tx.objectStore('tracks').delete(id);
-      tx.oncomplete = () => resolve();
-    });
+    return this.runTransaction(['tracks'], 'readwrite', tx => { tx.objectStore('tracks').delete(id); });
   }
 
   async savePlaylist(playlist) {
-    const tx = this.db.transaction(['playlists'], 'readwrite');
-
-    return new Promise(resolve => {
-      tx.objectStore('playlists').put(playlist);
-      tx.oncomplete = () => resolve();
-    });
+    return this.runTransaction(['playlists'], 'readwrite', tx => { tx.objectStore('playlists').put(playlist); });
   }
 
   async getAllPlaylists() {
-    const tx = this.db.transaction(['playlists'], 'readonly');
-
-    return new Promise(resolve => {
-      const req = tx.objectStore('playlists').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-    });
+    return this.runTransaction(['playlists'], 'readonly', tx => tx.objectStore('playlists').getAll());
   }
 
   async deletePlaylist(id) {
-    const tx = this.db.transaction(['playlists'], 'readwrite');
-
-    return new Promise(resolve => {
-      tx.objectStore('playlists').delete(id);
-      tx.oncomplete = () => resolve();
-    });
+    return this.runTransaction(['playlists'], 'readwrite', tx => { tx.objectStore('playlists').delete(id); });
   }
 
   async getCoverSource(id) {
-    const tx = this.db.transaction(['coverSources'], 'readonly');
-    return new Promise(resolve => {
-      const req = tx.objectStore('coverSources').get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    });
+    return this.runTransaction(['coverSources'], 'readonly', tx => tx.objectStore('coverSources').get(id))
+      .then(record => record || null, () => null);
   }
 
   async saveCoverSource(record) {
-    const tx = this.db.transaction(['coverSources'], 'readwrite');
-    return new Promise((resolve, reject) => {
-      tx.objectStore('coverSources').put(record);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    return this.runTransaction(['coverSources'], 'readwrite', tx => { tx.objectStore('coverSources').put(record); });
   }
 
   async saveStateKey(key, value) {
-    const tx = this.db.transaction(['appState'], 'readwrite');
-
-    return new Promise(resolve => {
-      tx.objectStore('appState').put({ key, value });
-      tx.oncomplete = () => resolve();
-    });
+    return this.saveStateEntries([{ key, value }]);
   }
 
   async savePlaybackState(trackId, position) {
-    const tx = this.db.transaction(['appState'], 'readwrite');
-    const store = tx.objectStore('appState');
-    store.put({ key: 'lastTrackId', value: trackId });
-    store.put({ key: 'lastPlaybackPosition', value: position });
+    return this.saveStateEntries([
+      { key: 'lastTrackId', value: trackId },
+      { key: 'lastPlaybackPosition', value: position }
+    ]);
+  }
 
-    return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('Playback state save aborted'));
+  saveStateEntries(entries) {
+    return this.runTransaction(['appState'], 'readwrite', tx => {
+      const store = tx.objectStore('appState');
+      for (const entry of entries) store.put(entry);
     });
   }
 
   async getStateKey(key) {
-    const tx = this.db.transaction(['appState'], 'readonly');
-
-    return new Promise(resolve => {
-      const req = tx.objectStore('appState').get(key);
-
-      req.onsuccess = () => {
-        resolve(
-          req.result !== undefined
-            ? req.result.value
-            : null
-        );
-      };
-    });
+    return this.runTransaction(['appState'], 'readonly', tx => tx.objectStore('appState').get(key))
+      .then(record => record !== undefined ? record.value : null);
   }
 
   async getAllState() {
-    const tx = this.db.transaction(['appState'], 'readonly');
-
-    return new Promise((resolve) => {
-      const req = tx.objectStore('appState').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-    });
+    return this.runTransaction(['appState'], 'readonly', tx => tx.objectStore('appState').getAll());
   }
 
   async clearAll() {
     const stores = ['tracks', 'playlists', 'appState', 'coverSources'];
 
-    for (const store of stores) {
-      await new Promise((resolve, reject) => {
-        const tx = this.db.transaction([store], 'readwrite');
-
-        tx.objectStore(store).clear();
-
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error || new Error(`Failed to clear ${store}`));
-        tx.onabort = () => reject(tx.error || new Error(`Clearing ${store} was aborted`));
-      });
-    }
+    return this.runTransaction(stores, 'readwrite', tx => {
+      for (const store of stores) tx.objectStore(store).clear();
+    });
   }
 }

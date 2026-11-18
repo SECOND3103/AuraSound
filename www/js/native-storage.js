@@ -68,6 +68,17 @@ export class NativeMusicStorage {
     if (bridge && typeof bridge.clearMusicFiles === 'function') bridge.clearMusicFiles();
   }
 
+  static getDuration(relativePath) {
+    const bridge = getNativeBridge();
+    if (!relativePath || typeof bridge?.getMusicDuration !== 'function') return 0;
+    try {
+      const duration = Number(bridge.getMusicDuration(relativePath));
+      return Number.isFinite(duration) && duration > 0 ? duration : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   static async readAsBlob(relativePath, mimeType = 'audio/*') {
     const bridge = getNativeBridge();
     if (!bridge || !relativePath) return null;

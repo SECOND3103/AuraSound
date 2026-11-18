@@ -32,4 +32,4 @@ AuraSound는 Spotify와 관련이 없으며 Spotify가 제작하거나 보증한
 
 ## 버전
 
-현재 버전: v1.0.0
+현재 버전: v1.0.1

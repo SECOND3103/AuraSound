@@ -66,7 +66,7 @@ window.__auraSoundNativeAction = function(action, value) {
   }
 };
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 
 import { StorageManager } from './storage.js';
 import { AudioPlayer } from './audio-player.js';
@@ -162,6 +162,7 @@ class App {
       repeatMode: 'off',
 
       activeView: 'home',
+      activeTab: 'home',
       previousView: 'home',
       detailBackView: 'home',
       detailBackStack: [],
@@ -217,21 +218,23 @@ class App {
     this.initCoverIconSizing();
     await this.storage.init();
 
-    this.state.tracks =
-      await this.storage.getAllTracks();
-
-    this.state.playlists =
-      await this.storage.getAllPlaylists();
+    [this.state.tracks, this.state.playlists] = await Promise.all([
+      this.storage.getAllTracks(),
+      this.storage.getAllPlaylists()
+    ]);
 
     this.migrateTrackData();
     await this.migratePlaylistData();
     await this.migrateTracksToNativeStorage();
     await this.ensureTrackDurations();
 
+    const savedState = new Map((await this.storage.getAllState()).map(entry => [entry.key, entry.value]));
+    const getSavedState = key => savedState.has(key) ? savedState.get(key) : null;
+
     this.setTheme();
 
     const savedVolume =
-      await this.storage.getStateKey('volume');
+      getSavedState('volume');
 
     const vol =
       savedVolume !== null
@@ -243,7 +246,7 @@ class App {
     document.getElementById('volume-bar').value = vol;
 
     const savedViewMode =
-      await this.storage.getStateKey('viewMode');
+      getSavedState('viewMode');
 
     if (savedViewMode) {
       this.state.activeViewMode = savedViewMode;
@@ -252,7 +255,7 @@ class App {
     this.applyViewModeUI();
 
     const savedSort =
-      await this.storage.getStateKey('activeSort');
+      getSavedState('activeSort');
 
     if (savedSort) {
       this.state.activeSort = savedSort === 'artist_asc' ? 'title_asc' : savedSort;
@@ -263,14 +266,14 @@ class App {
     this.state.librarySortMode = this.state.activeSort;
 
     const savedRepeat =
-      await this.storage.getStateKey('repeatMode');
+      getSavedState('repeatMode');
 
     if (savedRepeat) {
       this.state.repeatMode = savedRepeat;
     }
 
     const savedShuffle =
-      await this.storage.getStateKey('isShuffle');
+      getSavedState('isShuffle');
 
     if (savedShuffle !== null) {
       this.state.isShuffle = savedShuffle;
@@ -285,10 +288,10 @@ class App {
     this.updateSettingsUI();
 
     const lastTrackId =
-      await this.storage.getStateKey('lastTrackId');
+      getSavedState('lastTrackId');
 
     const savedPlaybackPosition =
-      await this.storage.getStateKey('lastPlaybackPosition');
+      getSavedState('lastPlaybackPosition');
 
     let restoredPlaybackPosition = Number.isFinite(Number(savedPlaybackPosition))
       ? Math.max(0, Number(savedPlaybackPosition))
@@ -310,13 +313,13 @@ class App {
     this.state.currentPlaybackPosition = restoredPlaybackPosition;
 
     const savedQueue =
-      await this.storage.getStateKey('queue');
+      getSavedState('queue');
 
     const savedQueueIdx =
-      await this.storage.getStateKey('queueIndex');
+      getSavedState('queueIndex');
 
     const savedPlaybackContext =
-      await this.storage.getStateKey('sourcePlaylist');
+      getSavedState('sourcePlaylist');
 
     if (lastTrackId) {
       this.state.currentTrackId = lastTrackId;
@@ -371,11 +374,11 @@ class App {
     const currentTrack = this.getCurrentTrack();
     const artworkLookup = this.buildArtworkLookup();
 
-    if (currentTrack && !nativeQueue.some(track => track.id === currentTrack.id)) {
+    const currentIndex = currentTrack ? nativeQueue.findIndex(track => track.id === currentTrack.id) : -1;
+    if (currentTrack && currentIndex < 0) {
       nativeQueue.unshift(currentTrack);
       nativeIndex = 0;
     } else if (currentTrack) {
-      const currentIndex = nativeQueue.findIndex(track => track.id === currentTrack.id);
       if (currentIndex >= 0) {
         nativeIndex = currentIndex;
         this.state.queueIndex = currentIndex;
@@ -445,7 +448,10 @@ class App {
       .forEach(btn => {
         btn.addEventListener(
           'click',
-          e => this.switchView(e.currentTarget.dataset.targetView)
+          e => {
+            this.closeCreateMenu();
+            this.switchView(e.currentTarget.dataset.targetView);
+          }
         );
       });
 
@@ -458,32 +464,37 @@ class App {
       this.closeProfileDrawer();
       this.switchView('settings');
     });
+    document.getElementById('btn-settings-back')?.addEventListener('click', () => this.handleBackNavigation());
     document.getElementById('btn-nav-create')?.addEventListener('click', () => this.toggleCreateMenu());
-    document.getElementById('btn-create-playlist')?.addEventListener('click', () => {
-      this.closeCreateMenu();
-      window.setTimeout(() => this.openCreatePlaylistModal(), 300);
+    document.getElementById('btn-library-add')?.addEventListener('click', () => {
+      const overlay = document.getElementById('library-add-sheet-overlay');
+      overlay.classList.add('active');
+      const sheet = overlay.querySelector('.bottom-sheet');
+      sheet.classList.add('is-opening');
+      window.setTimeout(() => sheet.classList.remove('is-opening'), 320);
     });
-    document.getElementById('btn-create-music')?.addEventListener('click', () => {
-      this.closeCreateMenu();
-      document.getElementById('audio-file-input')?.click();
-    });
+    for (const [prefix, close, duration] of [
+      ['btn-create-', () => this.closeCreateMenu(), 220],
+      ['btn-library-add-', () => this.closeOverlayWithAnimation('library-add-sheet-overlay'), 290]
+    ]) {
+      document.getElementById(prefix + 'playlist')?.addEventListener('click', () => {
+        close();
+        window.setTimeout(() => this.openCreatePlaylistModal(), duration);
+      });
+      document.getElementById(prefix + 'music')?.addEventListener('click', () => {
+        close();
+        document.getElementById('audio-file-input')?.click();
+      });
+      document.getElementById(prefix + 'import')?.addEventListener('click', () => {
+        close();
+        this.importBackup();
+      });
+    }
     this.bindProfileDrawerGestures();
 
-    document
-      .getElementById('btn-playlist-back')
-      .addEventListener(
-        'click',
-        () => this.navigateBackFromDetail()
-      );
-
-    document
-      .getElementById('btn-artist-back')
-      .addEventListener(
-        'click',
-        () => this.navigateBackFromDetail()
-      );
-
-    document.getElementById('btn-album-back')?.addEventListener('click', () => this.navigateBackFromDetail());
+    document.querySelectorAll('.view .btn-back').forEach(button => {
+      button.addEventListener('click', () => this.navigateBackFromDetail());
+    });
 
     document
       .getElementById('btn-modal-cancel')
@@ -507,13 +518,6 @@ class App {
       .getElementById('btn-import-backup')
       .addEventListener('click', () => this.importBackup());
 
-    document
-      .getElementById('btn-lib-create-pl')
-      .addEventListener(
-        'click',
-        () => this.openCreatePlaylistModal()
-      );
-
     const libSearchInput =
       document.getElementById(
         'library-search-input'
@@ -523,6 +527,18 @@ class App {
       document.getElementById(
         'btn-clear-lib-search'
       );
+
+    document.getElementById('btn-library-search')?.addEventListener('click', event => {
+      const box = document.getElementById('library-search-box');
+      const opening = box.classList.toggle('hidden') === false;
+      event.currentTarget.setAttribute('aria-expanded', String(opening));
+      if (opening) {
+        this.scrollMainContentToTop();
+        libSearchInput.focus();
+      } else {
+        libClearBtn.click();
+      }
+    });
 
     libSearchInput.addEventListener(
       'input',
@@ -586,7 +602,7 @@ class App {
         this.renderPlaylistTracks(this.getPlaylist(this.state.activePlaylistId), query);
       }
     });
-    document.getElementById('btn-open-artist-sort')?.addEventListener('click', () => this.openArtistSortSheet());
+    this.bindCollectionDetailScroll();
 
     document
       .getElementById('btn-open-sort')
@@ -601,6 +617,18 @@ class App {
         'click',
         () => this.openSortSheet('playlist')
       );
+
+    const playlistTools = {
+      'btn-detail-pl-add': playlist => this.modalAddMusicToPlaylist(playlist),
+      'btn-detail-pl-edit': playlist => this.modalEditPlaylist(playlist),
+      'btn-detail-pl-info': playlist => this.modalEditPlaylistName(playlist)
+    };
+    for (const [id, open] of Object.entries(playlistTools)) {
+      document.getElementById(id)?.addEventListener('click', () => {
+        const playlist = this.getPlaylist(this.state.activePlaylistId);
+        if (playlist) open(playlist);
+      });
+    }
 
     document
       .getElementById('btn-view-list')
@@ -637,21 +665,13 @@ class App {
         () => this.closeFullPlayer()
       );
 
-    document
-      .getElementById('btn-mini-more')
-      .addEventListener(
-        'click',
-        e => {
-          e.stopPropagation();
-
-          const current =
-            this.getCurrentTrack();
-
-          if (current) {
-            this.openTrackContextMenu(current);
-          }
-        }
-      );
+    for (const id of ['btn-mini-more', 'btn-full-more']) {
+      document.getElementById(id)?.addEventListener('click', event => {
+        event.stopPropagation();
+        const current = this.getCurrentTrack();
+        if (current) this.openTrackContextMenu(current);
+      });
+    }
 
     const toggle = e => {
       e.stopPropagation();
@@ -756,8 +776,10 @@ class App {
             }
             if (progress) progress.style.setProperty('--mini-progress', String(latest.pct / 100));
             document.getElementById('mini-player')?.style.setProperty('--mini-progress', String(latest.pct / 100));
-            if (currentLabel) currentLabel.textContent = formatTime(latest.currentTime);
-            if (durationLabel) durationLabel.textContent = formatTime(latest.duration);
+            const currentText = formatTime(latest.currentTime);
+            const durationText = formatTime(latest.duration);
+            if (currentLabel && currentLabel.textContent !== currentText) currentLabel.textContent = currentText;
+            if (durationLabel && durationLabel.textContent !== durationText) durationLabel.textContent = durationText;
           });
         }
 
@@ -972,6 +994,8 @@ class App {
     let blob = track.fileBlob || null;
 
     if (!blob && track.filePath && NativeMusicStorage.isAvailable()) {
+      const duration = NativeMusicStorage.getDuration(track.filePath);
+      if (duration > 0) return duration;
       blob = await NativeMusicStorage.readAsBlob(
         track.filePath,
         track.fileType || 'audio/*'
@@ -1021,9 +1045,11 @@ class App {
     }
 
     try {
-      const tracks = await this.storage.getAllTracks();
-      const playlists = await this.storage.getAllPlaylists();
-      const appState = await this.storage.getAllState();
+      const [tracks, playlists, appState] = await Promise.all([
+        this.storage.getAllTracks(),
+        this.storage.getAllPlaylists(),
+        this.storage.getAllState()
+      ]);
       const exportTracks = tracks.map((track, index) => ({
         ...track,
         backupFile: `${String(index + 1).padStart(4, '0')}_${(track.id || `track_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '_')}_${(track.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_')}`
@@ -1409,10 +1435,7 @@ class App {
           [...this.state.selectedTrackIds];
 
         if (ids.length) {
-          const first =
-            this.state.tracks.find(
-              t => t.id === ids[0]
-            );
+          const first = this.getTrackById(ids[0]);
 
           this.openTrackEditor(
             first,
@@ -1638,7 +1661,7 @@ class App {
   }
 
   async deleteTrackById(id) {
-    const track = this.state.tracks.find(t => t.id === id);
+    const track = this.getTrackById(id);
     if (!track) return;
 
     if (typeof this.player.releaseTrack === 'function') this.player.releaseTrack(id);
@@ -1699,15 +1722,13 @@ class App {
   }
 
   updateMiniPlayerColor(artwork = '') {
-    const miniPlayer = document.getElementById('mini-player');
-    if (!miniPlayer) return;
-    const fallbackColor = '#191414';
+    const playerStyle = document.documentElement.style;
     const artworkKey = artwork || '';
     if (this._miniPlayerColorArtwork === artworkKey) return;
     this._miniPlayerColorArtwork = artworkKey;
     const requestId = (this._miniPlayerColorRequest || 0) + 1;
     this._miniPlayerColorRequest = requestId;
-    miniPlayer.style.backgroundColor = fallbackColor;
+    playerStyle.removeProperty('--playing-artwork-color');
     if (!artworkKey) return;
 
     const nativeBridge = window.AuraSoundNative;
@@ -1722,40 +1743,40 @@ class App {
     image.decoding = 'async';
     image.onload = () => {
       if (this._miniPlayerColorRequest !== requestId) return;
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = 12;
-        canvas.height = 12;
-        const context = canvas.getContext('2d', { willReadFrequently: true });
-        if (!context) return;
-        context.drawImage(image, 0, 0, canvas.width, canvas.height);
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-        let red = 0, green = 0, blue = 0, weight = 0;
-        for (let index = 0; index < pixels.length; index += 4) {
-          const alpha = pixels[index + 3] / 255;
-          if (alpha < .08) continue;
-          red += pixels[index] * alpha;
-          green += pixels[index + 1] * alpha;
-          blue += pixels[index + 2] * alpha;
-          weight += alpha;
-        }
-        if (!weight) return;
-        const shade = value => Math.round(Math.max(0, Math.min(255, value / weight * .78)));
-        miniPlayer.style.backgroundColor = `rgb(${shade(red)}, ${shade(green)}, ${shade(blue)})`;
-      } catch (_) {
-        miniPlayer.style.backgroundColor = fallbackColor;
-      }
-    };
-    image.onerror = () => {
-      if (this._miniPlayerColorRequest === requestId) miniPlayer.style.backgroundColor = fallbackColor;
+      const color = this.sampleArtworkColor(image);
+      if (color) playerStyle.setProperty('--playing-artwork-color', color);
     };
     image.src = artworkKey;
   }
 
+  sampleArtworkColor(image) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 12;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return null;
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let red = 0, green = 0, blue = 0, weight = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const alpha = pixels[index + 3] / 255;
+        if (alpha < .08) continue;
+        red += pixels[index] * alpha;
+        green += pixels[index + 1] * alpha;
+        blue += pixels[index + 2] * alpha;
+        weight += alpha;
+      }
+      if (!weight) return null;
+      const shade = value => Math.round(Math.min(255, value / weight * .78));
+      return `rgb(${shade(red)}, ${shade(green)}, ${shade(blue)})`;
+    } catch (_) {
+      return null;
+    }
+  }
+
   setMiniPlayerPaletteColor(requestId, color) {
     if (Number(requestId) !== this._miniPlayerColorRequest || !/^#[\da-f]{6}$/i.test(color || '')) return;
-    const miniPlayer = document.getElementById('mini-player');
-    if (miniPlayer) miniPlayer.style.backgroundColor = color;
+    document.documentElement.style.setProperty('--playing-artwork-color', color);
   }
 
   initCoverIconSizing() {
@@ -1770,13 +1791,28 @@ class App {
       '.track-detail-art'
     ].join(',');
 
+    const pendingCovers = new Set();
+    let sizingFrame = 0;
     const resizeCoverIcon = element => {
       if (!element) return;
-      const icon = element.querySelector(':scope > .material-symbols-rounded');
-      if (!icon) return;
-      const rect = element.getBoundingClientRect();
-      const size = Math.min(rect.width, rect.height) / 2.5;
-      if (size > 0) icon.style.fontSize = `${size}px`;
+      pendingCovers.add(element);
+      if (sizingFrame) return;
+      sizingFrame = requestAnimationFrame(() => {
+        sizingFrame = 0;
+        const measurements = [];
+        for (const cover of pendingCovers) {
+          if (!cover.isConnected) continue;
+          const icon = cover.querySelector(':scope > .material-symbols-rounded');
+          if (!icon) continue;
+          const rect = cover.getBoundingClientRect();
+          const size = Math.min(rect.width, rect.height) / 2.5;
+          if (size > 0) measurements.push({ icon, fontSize: `${size}px` });
+        }
+        pendingCovers.clear();
+        for (const { icon, fontSize } of measurements) {
+          if (icon.style.fontSize !== fontSize) icon.style.fontSize = fontSize;
+        }
+      });
     };
 
     const observeCover = element => {
@@ -1803,17 +1839,30 @@ class App {
     if (typeof MutationObserver !== 'undefined') {
       this.coverIconMutationObserver = new MutationObserver(mutations => {
         mutations.forEach(mutation => {
+          if (mutation.target.matches?.(coverSelector)) resizeCoverIcon(mutation.target);
           mutation.addedNodes.forEach(node => {
             if (node.nodeType === Node.ELEMENT_NODE) scan(node);
+          });
+          mutation.removedNodes.forEach(node => {
+            if (node.nodeType !== Node.ELEMENT_NODE || node.isConnected) return;
+            const covers = [...node.querySelectorAll(coverSelector)];
+            if (node.matches(coverSelector)) covers.push(node);
+            covers.forEach(cover => {
+              this.coverIconResizeObserver?.unobserve(cover);
+              this.coverIconObserved.delete(cover);
+              pendingCovers.delete(cover);
+            });
           });
         });
       });
       this.coverIconMutationObserver.observe(document.body, { childList: true, subtree: true });
     }
 
-    window.addEventListener('resize', () => {
-      document.querySelectorAll(coverSelector).forEach(resizeCoverIcon);
-    });
+    if (!this.coverIconResizeObserver) {
+      window.addEventListener('resize', () => {
+        document.querySelectorAll(coverSelector).forEach(resizeCoverIcon);
+      });
+    }
   }
 
   setCoverElement(
@@ -1970,11 +2019,17 @@ class App {
     const panel = document.getElementById(`${inputId}-crop-panel`);
     const canvas = document.getElementById(`${inputId}-crop-canvas`);
     const input = document.getElementById(inputId);
+    let previewFrame = 0;
     const updatePreview = () => {
-      if (sourceImage) {
-        cropData = this.renderCoverCrop(sourceImage, settings, canvas, true);
-        if (!(followCheckboxId && document.getElementById(followCheckboxId)?.checked)) this.setCoverElement(preview, cropData, icon);
-      }
+      if (previewFrame) return;
+      previewFrame = requestAnimationFrame(() => {
+        previewFrame = 0;
+        if (!canvas?.isConnected || !preview?.isConnected) return;
+        if (sourceImage) {
+          cropData = this.renderCoverCrop(sourceImage, settings, canvas, true);
+          if (!(followCheckboxId && document.getElementById(followCheckboxId)?.checked)) this.setCoverElement(preview, cropData, icon);
+        }
+      });
     };
     const adjustButton = document.getElementById(`${inputId}-adjust`);
     adjustButton?.addEventListener('click', () => {
@@ -2200,7 +2255,7 @@ class App {
   }
 
   openTrackCoverEditor(track) {
-    const currentTrack = this.state.tracks.find(item => item.id === track?.id) || track;
+    const currentTrack = this.getTrackById(track?.id) || track;
     if (!currentTrack) return;
     const followsAlbum = currentTrack.coverFollowsAlbum !== false;
     const albumCover = this.getAlbumForTrack(currentTrack)?.coverData || '';
@@ -2211,7 +2266,7 @@ class App {
       extraHTML: `<label class="custom-checkbox-label" style="margin:12px 0;"><input type="checkbox" id="track-cover-follow-album" ${followsAlbum ? 'checked' : ''}><span>앨범 커버를 따르기</span></label><p class="editor-help-text">켜면 해당 곡의 앨범 커버를 사용합니다. 끄면 직접 설정한 커버를 사용하며, 직접 설정한 커버가 없으면 기본 커버가 표시됩니다.</p>`,
       followCheckboxId: 'track-cover-follow-album', followAlbumPreviewData: albumCover,
       onSave: async ({ cropData, sourceData, followsAlbum: follow }) => {
-        const storedTrack = this.state.tracks.find(item => item.id === currentTrack.id) || currentTrack;
+        const storedTrack = this.getTrackById(currentTrack.id) || currentTrack;
         if (cropData && sourceData) storedTrack.customCoverData = cropData;
         storedTrack.coverFollowsAlbum = !!follow;
         await this.storage.saveTrack(storedTrack);
@@ -2344,11 +2399,9 @@ class App {
             ).value.trim()
         };
 
+        const editedTracks = [];
         for (const id of ids) {
-          const t =
-            this.state.tracks.find(
-              x => x.id === id
-            );
+          const t = this.getTrackById(id);
 
           if (!t) continue;
 
@@ -2362,8 +2415,9 @@ class App {
               }
             });
 
-          await this.storage.saveTrack(t);
+          editedTracks.push(t);
         }
+        await this.storage.saveTracks(editedTracks);
 
         this.state.tracks =
           await this.storage.getAllTracks();
@@ -2376,17 +2430,14 @@ class App {
 
         this.renderAll();
 
-        if (ids.length === 1) {
-          this.toggleSelectionMode(false);
-        } else {
-          this.toggleSelectionMode(false);
-        }
+        this.toggleSelectionMode(false);
       }
     );
   }
 
 
   async openFileInfo(track) {
+    let context = null;
     let bitrate =
       '확인 불가';
 
@@ -2398,7 +2449,7 @@ class App {
 
     try {
       if (window.AudioContext && (track.fileBlob || track.filePath)) {
-        const context = new AudioContext();
+        context = new AudioContext();
         const fileBlob = track.fileBlob || await NativeMusicStorage.readAsBlob(track.filePath, track.fileType);
 
         const buffer =
@@ -2415,14 +2466,13 @@ class App {
         if (track.duration) {
           bitrate =
             `약 ${Math.round(
-              track.fileBlob.size *
+              (track.fileBlob?.size || track.fileSize || fileBlob.size) *
               8 /
               track.duration /
               1000
             )} kbps`;
         }
 
-        context.close();
       }
     } catch (_) {
       if (track.duration) {
@@ -2433,6 +2483,10 @@ class App {
             track.duration /
             1000
           )} kbps`;
+      }
+    } finally {
+      if (context) {
+        try { await context.close(); } catch (_) {}
       }
     }
 
@@ -2467,7 +2521,6 @@ class App {
             <div class="info-item">
               <small>파일 크기</small>
               ${formatBytes(
-                track.fileSize ||
                 track.fileSize ||
                 track.fileBlob?.size ||
                 0
@@ -2795,19 +2848,19 @@ class App {
       '음악 추가',
       bodyHtml,
       async () => {
-        const selectedIds =
+        const selectedIds = new Set(
           Array.from(
             document.querySelectorAll(
               '.pending-track-checkbox:checked'
             )
           ).map(
             cb => cb.value
-          );
+          ));
 
         const selectedTracks =
           pendingTracks.filter(
             t =>
-              selectedIds.includes(
+              selectedIds.has(
                 t.id
               )
           );
@@ -3004,22 +3057,13 @@ class App {
       track
     );
 
-    await this.storage.savePlaybackState(track.id, 0);
-
-    await this.storage.saveStateKey(
-      'queue',
-      this.state.queue
-    );
-
-    await this.storage.saveStateKey(
-      'queueIndex',
-      this.state.queueIndex
-    );
-
-    await this.storage.saveStateKey(
-      'sourcePlaylist',
-      this.state.playbackContext
-    );
+    await this.storage.saveStateEntries([
+      { key: 'lastTrackId', value: track.id },
+      { key: 'lastPlaybackPosition', value: 0 },
+      { key: 'queue', value: this.state.queue },
+      { key: 'queueIndex', value: this.state.queueIndex },
+      { key: 'sourcePlaylist', value: this.state.playbackContext }
+    ]);
 
     this.player.play();
 
@@ -3094,12 +3138,21 @@ class App {
     );
   }
 
+  getTrackById(id) {
+    const tracks = this.state.tracks;
+    if (this._indexedTracks !== tracks || this._indexedTrackCount !== tracks.length) {
+      this._trackById = new Map();
+      for (const track of tracks) {
+        if (!this._trackById.has(track.id)) this._trackById.set(track.id, track);
+      }
+      this._indexedTracks = tracks;
+      this._indexedTrackCount = tracks.length;
+    }
+    return this._trackById.get(id);
+  }
+
   getCurrentTrack() {
-    return this.state.tracks.find(
-      t =>
-        t.id ===
-        this.state.currentTrackId
-    );
+    return this.getTrackById(this.state.currentTrackId);
   }
 
   getPlaylist(id) {
@@ -3133,21 +3186,26 @@ class App {
         v.classList.remove('active')
       );
 
-    document
-      .querySelectorAll('.nav-btn')
-      .forEach(b =>
-        b.classList.remove('active')
-      );
+    const isBrowseTab = viewName === 'home' || viewName === 'library';
+    if (isBrowseTab) this.state.activeTab = viewName;
+    const activeTab = this.state.activeTab || 'home';
+    document.querySelectorAll('.nav-btn[data-target-view]').forEach(button => {
+      const active = button.dataset.targetView === activeTab;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
+    });
 
-    document
-      .getElementById(
-        `view-${viewName}`
-      )
-      ?.classList.add('active');
+    const settings = viewName === 'settings';
+    document.getElementById('app-header')?.classList.toggle('hidden', settings);
+    document.getElementById('settings-app-header')?.classList.toggle('hidden', !settings);
+    const browseTitle = document.getElementById('browse-header-title');
+    if (browseTitle) browseTitle.textContent = activeTab === 'library' ? '보관함' : '홈';
+    document.getElementById('library-header-actions')?.classList.toggle('hidden', viewName !== 'library');
 
-    const activeNav = Array.from(document.querySelectorAll('.nav-btn'))
-      .find(button => button.dataset.targetView === viewName);
-    activeNav?.classList.add('active');
+    const view = document.getElementById(`view-${viewName}`);
+    view?.classList.add('active');
+    this.setCollectionDetailView(view);
 
     if (viewName === 'home') {
       this.renderHome();
@@ -3223,16 +3281,17 @@ class App {
         startY = event.clientY;
         width = drawer.clientWidth;
         dragging = false;
-        try { target.setPointerCapture(pointerId); } catch (_) {}
       });
 
       target.addEventListener('pointermove', event => {
         if (event.pointerId !== pointerId) return;
         const dx = event.clientX - startX;
         const dy = event.clientY - startY;
-        if (!dragging && (dx > -8 || Math.abs(dx) <= Math.abs(dy))) return;
-
-        dragging = true;
+        if (!dragging) {
+          if (dx > -8 || Math.abs(dx) <= Math.abs(dy)) return;
+          dragging = true;
+          try { target.setPointerCapture(pointerId); } catch (_) {}
+        }
         const progress = Math.min(1, Math.max(0, -dx / Math.max(1, width)));
         const shift = Math.min(0, Math.max(-width, dx));
         const appShift = width * (1 - progress);
@@ -3274,7 +3333,7 @@ class App {
 
   toggleCreateMenu() {
     const overlay = document.getElementById('create-sheet-overlay');
-    if (overlay?.classList.contains('active')) this.closeCreateMenu();
+    if (overlay?.classList.contains('active') && !overlay.querySelector('.is-dismissing')) this.closeCreateMenu();
     else this.openCreateMenu();
   }
 
@@ -3289,27 +3348,112 @@ class App {
     const overlay = document.getElementById('create-sheet-overlay');
     const sheet = overlay?.querySelector('.bottom-sheet');
     if (!overlay || !sheet) return;
+    window.clearTimeout(this._createMenuTimer);
     sheet.classList.remove('is-dismissing');
-    sheet.style.animation = '';
-    sheet.style.transition = '';
     sheet.style.transform = '';
     sheet.style.opacity = '';
-    overlay.style.transition = '';
-    overlay.style.backgroundColor = '';
-    overlay.style.removeProperty('--create-backdrop-opacity');
+    overlay.style.removeProperty('--sheet-backdrop-progress');
     document.getElementById('btn-nav-create')?.classList.add('is-open');
     document.getElementById('btn-nav-create')?.setAttribute('aria-label', '만들기 메뉴 닫기');
     overlay.classList.add('active');
     sheet.classList.add('is-opening');
-    window.setTimeout(() => sheet.classList.remove('is-opening'), 340);
+    this._createMenuTimer = window.setTimeout(() => sheet.classList.remove('is-opening'), 340);
     this.sendNativeMessage('overlay', { open: true, type: 'create-sheet' });
   }
 
   scrollMainContentToTop() {
     const content = document.querySelector('.content-area');
     const activeView = document.querySelector('.view.active');
-    if (content) content.scrollTop = 0;
+    const search = this._collectionDetail?.searchAboveCover;
+    const searchHasQuery = search?.querySelector('input').value.trim();
+    if (content) content.scrollTop = search && !searchHasQuery ? search.offsetHeight : 0;
     if (activeView) activeView.scrollTop = 0;
+    this.updateCollectionDetailScroll();
+  }
+
+  setCollectionDetailView(view) {
+    this._collectionDetail = null;
+    const isDetail = Boolean(view?.classList.contains('collection-detail'));
+    document.getElementById('app')?.classList.toggle('detail-view-open', isDetail);
+    if (!isDetail) return;
+
+    const navigation = view.querySelector('.detail-navigation');
+    navigation.querySelector('.detail-navigation-title').textContent = view.querySelector('h2').textContent;
+    const search = view.querySelector('.detail-search-panel');
+    const hasQuery = Boolean(search.querySelector('input').value.trim());
+    search.querySelector('button').classList.toggle('hidden', !hasQuery);
+    const artwork = view.querySelector('.playlist-cover-large, .detail-artist-banner');
+    const detail = {
+      view, navigation, artwork,
+      searchAboveCover: view.querySelector('.detail-search-panel--above-cover'),
+      isArtist: view.classList.contains('collection-detail--artist'),
+      actions: navigation.querySelector('.detail-nav-right'),
+      more: navigation.querySelector('.detail-more'),
+      playAnchor: view.querySelector('.detail-play-slot, .playlist-action-btns .btn-primary-play'),
+      cover: view.querySelector('.playlist-detail-header')
+    };
+    this._collectionDetail = detail;
+    this.updateCollectionDetailArtworkColor(detail);
+  }
+
+  updateCollectionDetailArtworkColor(detail) {
+    const { view, artwork } = detail;
+    view.style.removeProperty('--detail-artwork-color');
+    const image = artwork.querySelector('img');
+    if (!image) return;
+    const applyColor = () => {
+      if (this._collectionDetail !== detail || image.parentElement !== artwork || !image.naturalWidth) return;
+      const color = this.sampleArtworkColor(image);
+      if (color) view.style.setProperty('--detail-artwork-color', color);
+    };
+    if (image.complete) applyColor();
+    else image.addEventListener('load', applyColor, { once: true });
+  }
+
+  updateCollectionDetailScroll() {
+    if (!this._collectionDetail) return;
+    const { view, navigation, actions, more, playAnchor, cover, artwork, isArtist, searchAboveCover } = this._collectionDetail;
+    const bar = navigation.getBoundingClientRect();
+    const destination = isArtist ? null : actions.getBoundingClientRect();
+    const origin = playAnchor.getBoundingClientRect();
+    const hero = cover.getBoundingClientRect();
+    const destinationY = bar.bottom;
+    const remainingY = origin.top + origin.height / 2 - destinationY;
+    const collapse = Math.max(0, Math.min(1, 1 - remainingY / 72));
+    const heroOffset = Math.max(0, bar.top - hero.top);
+    view.style.setProperty('--detail-collapse', String(collapse));
+    if (searchAboveCover) {
+      const artworkHeight = Math.max(1, artwork.offsetHeight);
+      const shrink = Math.min(heroOffset, artworkHeight * .64);
+      view.style.setProperty('--playlist-cover-offset', `${shrink}px`);
+      view.style.setProperty('--playlist-cover-scale', String(1 - shrink / artworkHeight));
+    } else if (isArtist) {
+      const fade = Math.min(1, heroOffset / Math.max(120, hero.height * .72));
+      view.style.setProperty('--detail-cover-progress', String(fade));
+    }
+    if (destination) {
+      view.style.setProperty('--detail-play-x', `${(origin.right - destination.right) * (1 - collapse)}px`);
+      view.style.setProperty('--detail-play-y', `${destinationY - destination.top - destination.height / 2 + Math.max(0, remainingY)}px`);
+      more.inert = collapse >= .98;
+      view.classList.add('detail-positioned');
+    }
+  }
+
+  bindCollectionDetailScroll() {
+    const content = document.getElementById('content-area');
+    if (!content) return;
+    let frame = 0;
+    const requestUpdate = () => {
+      if (!this._collectionDetail || frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        this.updateCollectionDetailScroll();
+      });
+    };
+    content.addEventListener('scroll', requestUpdate, { passive: true });
+    window.addEventListener('resize', requestUpdate, { passive: true });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(requestUpdate).observe(content);
+    document.fonts?.ready.then(requestUpdate);
   }
 
   setupMarqueeObserver() {
@@ -3375,63 +3519,22 @@ class App {
       this.sendNativeMessage('overlay', { open: anyOverlay, type: 'overlay' });
     };
 
-    const resetBackdrop = overlay => {
-      overlay.style.removeProperty('--sheet-drag-dim');
-      overlay.style.backgroundColor = '';
-    };
-
-    const updateBackdrop = (overlay, distance, maxDistance = 260) => {
-      const progress = Math.min(1, Math.max(0, distance / maxDistance));
-      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-      const baseAlpha = isDark ? 0.70 : 0.40;
-      const alpha = baseAlpha * (1 - progress);
-      overlay.style.setProperty('--sheet-drag-dim', `${alpha}`);
-      overlay.style.backgroundColor = `rgba(0, 0, 0, ${alpha})`;
-    };
-
-    const closeSheet = (overlay, sheet, type) => {
-      if (!overlay || !sheet) return;
-      if (type === 'create-sheet-overlay') {
-        this.closeOverlayWithAnimation(type);
-        return;
-      }
-      overlay.style.transition = 'background-color .28s ease';
-      sheet.classList.remove('is-dragging');
-      sheet.classList.add('is-dismissing');
-      sheet.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1)';
-      sheet.style.transform = 'translate3d(0, 100%, 0)';
-      updateBackdrop(overlay, 260, 260);
-      window.setTimeout(() => {
-        overlay.classList.remove('active');
-        sheet.classList.remove('is-dismissing', 'is-opening');
-        sheet.style.transition = '';
-        sheet.style.transform = '';
-        resetBackdrop(overlay);
-        overlay.style.transition = '';
-        this.sendNativeMessage('overlay', { open: false, type });
-        notifyOverlayState();
-      }, 290);
-    };
-
     const overlayObserver = new MutationObserver(mutations => {
       for (const mutation of mutations) {
         if (mutation.type !== 'attributes' || mutation.attributeName !== 'class') continue;
         const el = mutation.target;
         const id = el.id;
-        if (!['modal-overlay','bottom-sheet-overlay','playlist-sheet-overlay','artist-sheet-overlay','album-sheet-overlay','queue-sheet-overlay','sort-sheet-overlay','pl-sort-sheet-overlay','artist-sort-sheet-overlay','create-sheet-overlay','profile-drawer-overlay','full-player'].includes(id)) continue;
         const isActive = el.classList.contains('active');
         if (id === 'create-sheet-overlay') {
           const createButton = document.getElementById('btn-nav-create');
           const createSheet = el.querySelector('.bottom-sheet');
-          const bottomNav = document.querySelector('.bottom-nav');
           const isOpening = isActive && !createSheet?.classList.contains('is-dismissing');
           createButton?.classList.toggle('is-open', isOpening);
           createButton?.setAttribute('aria-label', isOpening ? '만들기 메뉴 닫기' : '만들기 메뉴 열기');
-          bottomNav?.classList.toggle('create-menu-open', isOpening);
         }
         if (isActive) {
           el.scrollTop = 0;
-          el.querySelectorAll('.bottom-sheet, .modal-dialog, .modal-body-scroll, .queue-list')
+          el.querySelectorAll('.bottom-sheet, .sheet-menu-list, .create-sheet-options, .modal-dialog, .modal-body-scroll, .queue-list')
             .forEach(scrollable => { scrollable.scrollTop = 0; });
         }
         const index = this.overlayStack.indexOf(id);
@@ -3447,77 +3550,109 @@ class App {
     document.querySelectorAll('.bottom-sheet-overlay').forEach(overlay => {
       const sheet = overlay.querySelector('.bottom-sheet');
       if (!sheet) return;
-      let startY = 0, pointerId = null, dragging = false;
+      let gesture = null;
+      let pointerId = null;
+      let touchId = null;
+      let suppressClick = false;
 
-      const isInteractive = target => !!target.closest(
-        'button, input, textarea, select, a, .clickable, .sheet-menu-item, .drag-item'
-      );
-      const canStart = e => {
-        if (!overlay.classList.contains('active')) return false;
-        if (e.target.closest('.queue-list, .track-list .track-row, .drag-item, .modal-body-scroll')) return false;
-        if (e.target.closest('input, textarea, select, button, a, .clickable')) return false;
-        return true;
+      const start = (target, point) => {
+        suppressClick = false;
+        if (!overlay.classList.contains('active') || sheet.classList.contains('is-dismissing')) return;
+        if (target.closest('input, textarea, select, [draggable="true"], .drag-handle')) return;
+        const scroller = target.closest('.sheet-menu-list, .queue-list, .create-sheet-options') || sheet;
+        if (scroller.scrollTop > 1) return;
+        gesture = { x: point.clientX, y: point.clientY, distance: 0, dragging: false };
       };
 
-      const start = e => {
-        if (!canStart(e)) return;
-        startY = e.clientY;
-        pointerId = e.pointerId;
-        dragging = false;
-        overlay.style.transition = 'none';
-        sheet.style.touchAction = 'none';
-        sheet.classList.add('gesture-ready');
-        try { overlay.setPointerCapture(pointerId); } catch (_) {}
-      };
-
-      const move = e => {
-        if (e.pointerId !== pointerId) return;
-        const dy = e.clientY - startY;
-        if (!dragging) {
-          if (dy < 8) return;
-          dragging = true;
+      const move = (point, event) => {
+        if (!gesture || sheet.classList.contains('is-dismissing')) return;
+        const dy = point.clientY - gesture.y;
+        const dx = Math.abs(point.clientX - gesture.x);
+        if (!gesture.dragging) {
+          if (Math.max(dx, Math.abs(dy)) < 5) return;
+          if (dy <= dx) {
+            gesture = null;
+            return;
+          }
+          gesture.dragging = true;
+          suppressClick = true;
+          const { transform, opacity } = getComputedStyle(sheet);
+          gesture.position = new DOMMatrix(transform === 'none' ? undefined : transform);
+          gesture.startOffset = gesture.position.m42;
+          if (sheet.classList.contains('is-opening')) sheet.style.opacity = opacity;
           sheet.classList.remove('is-opening');
           sheet.classList.add('is-dragging');
+          if (pointerId !== null) {
+            try { sheet.setPointerCapture(pointerId); } catch (_) {}
+          }
         }
-        const positive = Math.max(0, dy);
-        sheet.style.transform = `translate3d(0, ${positive}px, 0)`;
-        updateBackdrop(overlay, positive);
-        e.preventDefault();
+        gesture.distance = Math.max(0, dy);
+        gesture.position.m42 = gesture.startOffset + gesture.distance;
+        sheet.style.transform = gesture.position.toString();
+        overlay.style.setProperty('--sheet-backdrop-progress', String(Math.max(0, 1 - gesture.distance / 260)));
+        if (event.cancelable) event.preventDefault();
       };
 
-      const end = e => {
-        if (pointerId === null || e.pointerId !== pointerId) return;
-        const dy = Math.max(0, e.clientY - startY);
+      const finish = (cancelled = false) => {
+        const ended = gesture;
+        gesture = null;
+        if (!ended?.dragging || sheet.classList.contains('is-dismissing')) return;
+        sheet.classList.remove('is-dragging');
+        const threshold = Math.max(36, Math.min(96, sheet.clientHeight * .2));
+        if (!cancelled && ended.distance >= threshold) {
+          this.closeOverlayWithAnimation(overlay.id);
+        } else {
+          sheet.style.transform = '';
+          sheet.style.opacity = '';
+          overlay.style.removeProperty('--sheet-backdrop-progress');
+        }
+      };
+
+      sheet.addEventListener('pointerdown', event => {
+        if (event.pointerType === 'touch' || !event.isPrimary || event.button !== 0) return;
+        start(event.target, event);
+        if (gesture) pointerId = event.pointerId;
+      });
+      sheet.addEventListener('pointermove', event => {
+        if (event.pointerId === pointerId) move(event, event);
+      });
+      const finishPointer = event => {
+        if (event.pointerId !== pointerId) return;
         pointerId = null;
-        try { overlay.releasePointerCapture(e.pointerId); } catch (_) {}
-        sheet.classList.remove('gesture-ready');
-        if (!dragging) {
-          sheet.style.touchAction = '';
-          overlay.style.transition = '';
+        finish(event.type === 'pointercancel');
+      };
+      sheet.addEventListener('pointerup', finishPointer);
+      sheet.addEventListener('pointercancel', finishPointer);
+      sheet.addEventListener('pointerleave', event => {
+        if (!gesture?.dragging) finishPointer(event);
+      });
+
+      sheet.addEventListener('touchstart', event => {
+        if (event.touches.length !== 1) {
+          touchId = null;
+          finish(true);
           return;
         }
-        dragging = false;
-        sheet.classList.remove('is-dragging');
-        if (dy > 100 || dy / Math.max(1, sheet.clientHeight) > .18) {
-          sheet.style.touchAction = '';
-          closeSheet(overlay, sheet, overlay.id);
-        } else {
-          overlay.style.transition = 'background-color .28s ease';
-          sheet.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1)';
-          sheet.style.transform = 'translate3d(0, 0, 0)';
-          resetBackdrop(overlay);
-          window.setTimeout(() => {
-            sheet.style.transition = '';
-            sheet.style.touchAction = '';
-            overlay.style.transition = '';
-          }, 290);
-        }
+        const touch = event.touches[0];
+        start(event.target, touch);
+        if (gesture) touchId = touch.identifier;
+      }, { passive: true });
+      sheet.addEventListener('touchmove', event => {
+        const touch = event.touches[0];
+        if (event.touches.length === 1 && touch.identifier === touchId) move(touch, event);
+      }, { passive: false });
+      const finishTouch = event => {
+        if (!Array.from(event.changedTouches).some(touch => touch.identifier === touchId)) return;
+        touchId = null;
+        finish(event.type === 'touchcancel');
       };
-
-      overlay.addEventListener('pointerdown', start, { passive:false, capture:true });
-      overlay.addEventListener('pointermove', move, { passive:false, capture:true });
-      overlay.addEventListener('pointerup', end, { capture:true });
-      overlay.addEventListener('pointercancel', end, { capture:true });
+      sheet.addEventListener('touchend', finishTouch, { passive: true });
+      sheet.addEventListener('touchcancel', finishTouch, { passive: true });
+      sheet.addEventListener('click', event => {
+        if (!suppressClick || !event.detail) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }, true);
     });
 
     const full = document.getElementById('full-player');
@@ -3660,6 +3795,12 @@ class App {
       return true;
     }
 
+    if (this.state.activeView === 'settings') {
+      const returnView = this.state.previousView;
+      this.switchView(returnView && returnView !== 'settings' ? returnView : (this.state.activeTab || 'home'));
+      return true;
+    }
+
     if (this.state.selectionMode) {
       this.scrollMainContentToTop();
       this.toggleSelectionMode(false);
@@ -3671,13 +3812,6 @@ class App {
       this.navigateBackFromDetail();
       return true;
     }
-    if (this.state.activeView === 'settings') {
-      const returnView = ['home', 'library'].includes(this.state.previousView)
-        ? this.state.previousView
-        : 'home';
-      this.switchView(returnView);
-      return true;
-    }
     return false;
   }
 
@@ -3686,53 +3820,37 @@ class App {
     const sheet = overlay?.querySelector('.bottom-sheet');
     if (!overlay?.classList.contains('active') || !sheet || sheet.classList.contains('is-dismissing')) return;
 
-    if (id === 'create-sheet-overlay') {
-      const createButton = document.getElementById('btn-nav-create');
-      document.querySelector('.bottom-nav')?.classList.remove('create-menu-open');
-      createButton?.classList.remove('is-open');
-      createButton?.setAttribute('aria-label', '만들기 메뉴 열기');
-      sheet.classList.remove('is-opening', 'is-dragging', 'gesture-ready');
-      sheet.classList.add('is-dismissing');
-      sheet.style.animation = 'none';
-      const dragOffset = Number(sheet.style.transform.match(/translate3d\(0,\s*(-?[\d.]+)px/)?.[1]) || 0;
-      sheet.style.transition = 'transform .22s cubic-bezier(.2,.7,.2,1), opacity .22s ease';
-      sheet.style.transform = `translate3d(0, ${dragOffset + 14}px, 0)`;
-      sheet.style.opacity = '0';
-      overlay.style.transition = 'background-color .22s ease';
-      overlay.style.backgroundColor = 'rgba(0, 0, 0, 0)';
-      overlay.style.setProperty('--create-backdrop-opacity', '0');
-      window.setTimeout(() => {
-        overlay.classList.remove('active');
-        sheet.classList.remove('is-dismissing');
-        sheet.style.animation = '';
-        sheet.style.transition = '';
-        sheet.style.transform = '';
-        sheet.style.opacity = '';
-        sheet.style.touchAction = '';
-        overlay.style.transition = '';
-        overlay.style.removeProperty('--sheet-drag-dim');
-        overlay.style.removeProperty('--create-backdrop-opacity');
-        overlay.style.backgroundColor = '';
-        this.sendNativeMessage('overlay', { open: false, type: id });
-      }, 220);
-      return;
-    }
+    const isCreateMenu = id === 'create-sheet-overlay';
+    const { transform, opacity } = getComputedStyle(sheet);
+    const position = new DOMMatrix(transform === 'none' ? undefined : transform);
+    sheet.style.transition = 'none';
+    sheet.style.transform = position.toString();
+    sheet.style.opacity = opacity;
     sheet.classList.remove('is-opening', 'is-dragging');
     sheet.classList.add('is-dismissing');
-    overlay.style.setProperty('--sheet-drag-dim', '0');
-    overlay.style.backgroundColor = 'rgba(0, 0, 0, 0)';
-    sheet.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1)';
-    sheet.style.transform = 'translate3d(0, 100%, 0)';
-    window.setTimeout(() => {
+    void sheet.offsetWidth;
+
+    if (isCreateMenu) {
+      window.clearTimeout(this._createMenuTimer);
+      const createButton = document.getElementById('btn-nav-create');
+      createButton?.classList.remove('is-open');
+      createButton?.setAttribute('aria-label', '만들기 메뉴 열기');
+    }
+    sheet.style.transition = '';
+    position.m42 += 14;
+    sheet.style.transform = isCreateMenu ? position.toString() : 'translate3d(0, 100%, 0)';
+    if (isCreateMenu) sheet.style.opacity = '0';
+    overlay.style.setProperty('--sheet-backdrop-progress', '0');
+
+    const closeTimer = window.setTimeout(() => {
       overlay.classList.remove('active');
       sheet.classList.remove('is-dismissing');
-      overlay.style.transition = '';
-      overlay.style.removeProperty('--sheet-drag-dim');
-      overlay.style.backgroundColor = '';
-      sheet.style.transition = '';
+      overlay.style.removeProperty('--sheet-backdrop-progress');
       sheet.style.transform = '';
+      sheet.style.opacity = '';
       this.sendNativeMessage('overlay', { open: false, type: id });
-    }, 290);
+    }, isCreateMenu ? 220 : 290);
+    if (isCreateMenu) this._createMenuTimer = closeTimer;
   }
 
   renderAll() {
@@ -3755,43 +3873,27 @@ class App {
   updateHomeNowPlayingIndicators() {
     const context = this.state.playbackContext;
     const contextType = context?.type;
-    const contextId = context?.id == null ? '' : String(context.id).trim();
-    const normalizedContextId = contextType === 'artist' && contextId && !contextId.startsWith('artist:')
-      ? `artist:${contextId}`
-      : contextId;
-    const contextName = String(context?.name || '').trim();
-    const currentTrack = this.getCurrentTrack();
-    const hasActiveContext = Boolean(this.state.currentTrackId)
-      && ['album', 'playlist', 'artist'].includes(contextType);
+    let contextId = String(context?.id ?? '').trim();
+    if (contextType === 'artist') {
+      contextId ||= (context.name || this.getCurrentTrack()?.artist || '').trim();
+      if (contextId && !contextId.startsWith('artist:')) contextId = `artist:${contextId}`;
+    }
 
     document.querySelectorAll('#home-quick-grid .quick-card').forEach(card => {
-      const cardType = card.dataset.homeContextType;
-      const cardId = String(card.dataset.homeContextId || '').trim();
-      const normalizedCardId = cardType === 'artist' && cardId && !cardId.startsWith('artist:')
-        ? `artist:${cardId}`
-        : cardId;
-      const matchesById = hasActiveContext
-        && cardType === contextType
-        && normalizedCardId
-        && normalizedCardId === normalizedContextId;
-      const matchesArtistName = hasActiveContext
-        && contextType === 'artist'
-        && cardType === 'artist'
-        && (String(card.dataset.homeContextName || '').trim() === contextName
-          || String(card.dataset.homeContextName || '').trim() === String(currentTrack?.artist || '').trim());
-      const matchesContext = Boolean(matchesById || matchesArtistName);
-      const isPlayingHere = Boolean(matchesContext && this.state.isPlaying);
-      const indicator = card.querySelector('.home-now-playing-indicator');
-
-      card.classList.toggle('is-context-active', Boolean(matchesContext));
-      card.classList.toggle('is-now-playing', isPlayingHere);
-      if (indicator) {
-        indicator.style.display = matchesContext ? 'flex' : '';
-        indicator.style.color = matchesContext ? '#1ed760' : '';
-      }
+      const matchesContext = Boolean(this.state.currentTrackId && contextId)
+        && card.dataset.homeContextType === contextType
+        && card.dataset.homeContextId === contextId;
+      card.classList.toggle('is-context-active', matchesContext);
+      card.classList.toggle('is-now-playing', matchesContext && this.state.isPlaying);
       if (matchesContext) card.setAttribute('aria-current', 'true');
       else card.removeAttribute('aria-current');
     });
+  }
+
+  getCollectionSubtitle(type, item) {
+    if (type === 'album') return item.artist || '알 수 없는 아티스트';
+    if (type === 'artist') return `아티스트 · ${item.tracks.length}곡`;
+    return `플레이리스트 · ${this.getTracksForPlaylist(item).length}곡`;
   }
 
   renderHome() {
@@ -3850,29 +3952,23 @@ class App {
         card.dataset.homeContextType = entry.type;
         card.dataset.homeContextId = entry.type === 'artist'
           ? `artist:${item.name}`
-          : String(item.id ?? '');
-        card.dataset.homeContextName = String(item.name || '');
+          : String(item.id ?? '').trim();
       }
       let title = '';
-      let secondary = '';
       let art = '';
       let fallback = 'album';
       let cover = '';
 
       if (entry.type === 'artist') {
         title = item.name;
-        secondary = `${item.tracks.length}곡`;
         cover = artistCovers[item.name] || '';
         fallback = 'person';
       } else if (entry.type === 'album') {
         title = item.name;
-        secondary = item.artist || '알 수 없는 아티스트';
         cover = item.coverData || '';
         fallback = 'album';
       } else {
         title = item.name || '';
-        const playlistTracks = this.getTracksForPlaylist(item);
-        secondary = `${playlistTracks.length}곡`;
         cover = item.coverData || '';
         fallback = 'queue_music';
       }
@@ -3891,6 +3987,7 @@ class App {
           ${nowPlayingIndicator}
         `;
       } else {
+        const secondary = this.getCollectionSubtitle(entry.type, item);
         card.innerHTML = `
           <div class="media-card-art${entry.type === 'artist' ? ' artist-home-quick-art artist-artwork' : ''}">${art}</div>
           <div class="track-title-viewport home-media-title"><div class="title marquee-content">${escapeHtml(title)}</div></div>
@@ -3931,7 +4028,7 @@ class App {
             ${album.coverData ? `<img src="${album.coverData}" alt="">` : '<span class="material-symbols-rounded">album</span>'}
           </div>
           <div class="track-title-viewport home-media-title"><div class="title marquee-content">${escapeHtml(album.name)}</div></div>
-          <div class="track-artist-viewport home-media-title"><div class="subtitle marquee-content">${escapeHtml(album.artist || '알 수 없는 아티스트')}</div></div>
+          <div class="track-artist-viewport home-media-title"><div class="subtitle marquee-content">${escapeHtml(this.getCollectionSubtitle('album', album))}</div></div>
         `;
         card.onclick = () => this.openAlbumDetail(album.id);
         topContainer.appendChild(card);
@@ -4018,12 +4115,11 @@ class App {
       });
 
       matchedPlaylists.forEach(playlist => {
-        const playlistTracks = this.getTracksForPlaylist(playlist);
         const row = this.createCollectionRow({
           title: playlist.name,
           coverData: playlist.coverData || '',
           fallbackIcon: 'queue_music',
-          secondaryText: `${playlistTracks.length}곡 • ${formatTotalTime(playlistTracks)}`,
+          secondaryText: this.getCollectionSubtitle('playlist', playlist),
           onOpen: () => this.openPlaylistDetail(playlist),
           onLongPress: () => {
             this.state.activePlaylistId = playlist.id;
@@ -4052,7 +4148,7 @@ class App {
             coverData: album.coverData,
             fallbackIcon: 'album',
             artworkClass: 'album-list-art',
-            secondaryText: `${album.artist || '알 수 없는 아티스트'} • ${album.tracks.length}곡`,
+            secondaryText: this.getCollectionSubtitle('album', album),
             onOpen: () => this.openAlbumDetail(album.id),
             onLongPress: () => this.openAlbumMenu(album.id)
           });
@@ -4182,7 +4278,7 @@ class App {
             coverData: artistCover,
             fallbackIcon: 'person',
             artworkClass: 'artist-list-art artist-artwork',
-            secondaryText: `${group.tracks.length}곡 • ${formatTotalTime(group.tracks)}`,
+            secondaryText: this.getCollectionSubtitle('artist', group),
             onOpen: () => this.openArtistDetail(group.name),
             onLongPress: () => this.openArtistMenu(group.name, group.tracks),
             actionsHtml: ''
@@ -4356,7 +4452,13 @@ class App {
         this.renderAlbumTracks(albumId);
         this.renderLibrary(document.getElementById('library-search-input')?.value || '');
         const refreshed = this.getAlbumGroups().find(item => item.id === albumId);
-        if (refreshed) this.setCoverElement(document.getElementById('album-detail-cover'), refreshed.coverData || '', 'album');
+        if (refreshed) {
+          const artwork = document.getElementById('album-detail-cover');
+          this.setCoverElement(artwork, refreshed.coverData || '', 'album');
+          if (this._collectionDetail?.artwork === artwork) {
+            this.updateCollectionDetailArtworkColor(this._collectionDetail);
+          }
+        }
       }
     });
   }
@@ -4429,11 +4531,10 @@ class App {
     const container = document.getElementById('album-tracks-container');
     if (!container) return;
     const tracks = this.getVisibleAlbumTracks(albumId);
-    const artworkLookup = this.buildArtworkLookup();
     const title = document.getElementById('album-detail-sub');
     if (title) title.textContent = `${tracks.length}곡 • ${formatTotalTime(tracks)}`;
     container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>검색 결과가 없습니다.</p></div>';
-    tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'album', id: albumId, name: album?.name || track.album || '' }, artworkLookup)));
+    tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'album', id: albumId, name: album?.name || track.album || '' })));
     if (album) {
       document.getElementById('album-detail-title').textContent = album.name;
       document.getElementById('album-detail-artist').textContent = album.artist || '알 수 없는 아티스트';
@@ -4584,18 +4685,20 @@ class App {
     };
 
     element.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || event.target.closest('input, textarea, select')) return;
+      if (!event.isPrimary || event.button !== 0) return;
+      clearPress();
+      suppressNextClick = false;
+      pointerId = null;
+      if (event.target.closest('button, input, textarea, select, a, label')) return;
       pointerId = event.pointerId;
       startX = event.clientX;
       startY = event.clientY;
-      try { element.setPointerCapture(pointerId); } catch (_) {}
       pressTimer = window.setTimeout(() => {
         pressTimer = 0;
         suppressNextClick = true;
         element.classList.add('long-pressed');
         onLongPress();
         window.setTimeout(() => element.classList.remove('long-pressed'), 240);
-        window.setTimeout(() => { suppressNextClick = false; }, 800);
       }, 520);
     });
 
@@ -4611,9 +4714,15 @@ class App {
     };
     element.addEventListener('pointerup', finishPress);
     element.addEventListener('pointercancel', finishPress);
-    element.addEventListener('lostpointercapture', finishPress);
+    element.addEventListener('pointerleave', finishPress);
+    element.addEventListener('contextmenu', event => {
+      if (pressTimer || suppressNextClick) event.preventDefault();
+    });
+    element.addEventListener('touchend', event => {
+      if (suppressNextClick && event.cancelable) event.preventDefault();
+    }, { passive: false });
     element.addEventListener('click', event => {
-      if (!suppressNextClick) return;
+      if (!suppressNextClick || event.detail === 0) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       suppressNextClick = false;
@@ -4645,7 +4754,8 @@ class App {
 
     const allowSelection =
       this.state.selectionMode &&
-      this.state.activeView === 'library';
+      this.state.activeView === 'library' &&
+      playbackContext?.type === 'library';
 
     const selectHtml =
       allowSelection
@@ -4670,27 +4780,18 @@ class App {
         `
         : '';
 
-    const resolvedArtwork = this.getTrackArtworkData(track, artworkLookup);
-    const artworkHtml =
-      resolvedArtwork
-        ? `
-          <img
-            src="${resolvedArtwork}"
-            alt="">
-        `
-        : `
-          <span
-            class="material-symbols-rounded">
-            music_note
-          </span>
-        `;
+    let artworkHtml = '';
+    if (playbackContext?.type !== 'album') {
+      const artwork = this.getTrackArtworkData(track, artworkLookup);
+      artworkHtml = `<div class="track-artwork">
+        ${artwork ? `<img src="${artwork}" alt="">` : '<span class="material-symbols-rounded">music_note</span>'}
+      </div>`;
+    }
 
     row.innerHTML = `
       ${selectHtml}
 
-      <div class="track-artwork">
-        ${artworkHtml}
-      </div>
+      ${artworkHtml}
 
       <div class="track-main">
 
@@ -4743,47 +4844,22 @@ class App {
       </div>
     `;
 
-    row
-      .querySelector(
-        '.track-main'
-      )
-      .onclick =
-      e => {
-        e.stopPropagation();
+    const playRowTrack = event => {
+      event.stopPropagation();
+      const context = playbackContext || { type: 'library', name: track.title };
+      const list = context.type === 'library' || !contextList.length ? [track] : contextList;
+      const index = Math.max(0, list.findIndex(t => t.id === track.id));
+      this.playTrack(track, list, index, context);
+    };
+    row.querySelectorAll('.track-main, .track-artwork').forEach(element => {
+      element.onclick = playRowTrack;
+    });
 
-        const context = playbackContext || { type: 'library', name: track.title };
-        const list = context.type === 'library' ? [track] : (contextList.length ? contextList : [track]);
-        const index = Math.max(0, list.findIndex(t => t.id === track.id));
-        this.playTrack(track, list, index, context);
-      };
-
-    row
-      .querySelector(
-        '.track-artwork'
-      )
-      .onclick =
-      e => {
-        e.stopPropagation();
-
-        const context = playbackContext || { type: 'library', name: track.title };
-        const list = context.type === 'library' ? [track] : (contextList.length ? contextList : [track]);
-        const index = Math.max(0, list.findIndex(t => t.id === track.id));
-        this.playTrack(track, list, index, context);
-      };
-
-    row
-      .querySelector(
-        '.more-button'
-      )
-      .onclick =
-      e => {
-        e.stopPropagation();
-
-        this.openTrackContextMenu(
-          track,
-          playbackContext?.type || null
-        );
-      };
+    const openTrackMenu = () => this.openTrackContextMenu(track, playbackContext?.type || null);
+    row.querySelector('.more-button').onclick = event => {
+      event.stopPropagation();
+      openTrackMenu();
+    };
 
     const checkbox =
       row.querySelector(
@@ -4799,9 +4875,7 @@ class App {
           );
     }
 
-    if (this.state.activeView === 'library') {
-      this.bindLongPress(row, () => this.openTrackContextMenu(track, playbackContext?.type || null));
-    }
+    this.bindLongPress(row, openTrackMenu);
 
     return row;
   }
@@ -4877,10 +4951,7 @@ class App {
   }
 
   openTrackContextMenu(track, sourceContext = null) {
-    const currentTrack =
-      this.state.tracks.find(
-        t => t.id === track?.id
-      ) || track;
+    const currentTrack = this.getTrackById(track?.id) || track;
 
     track = currentTrack;
 
@@ -5077,14 +5148,12 @@ class App {
       'queue_music'
     );
 
-    this.switchView(
-      'playlist-detail'
-    );
-
     this.renderPlaylistTracks(
       playlist,
       ''
     );
+
+    this.switchView('playlist-detail');
 
     const playlistSheetArt = document.getElementById('pl-sheet-art');
     if (playlistSheetArt) {
@@ -5169,12 +5238,7 @@ class App {
     playlist
   ) {
     return playlist.trackIds
-      .map(
-        id =>
-          this.state.tracks.find(
-            t => t.id === id
-          )
-      )
+      .map(id => this.getTrackById(id))
       .filter(Boolean);
   }
 
@@ -5185,9 +5249,8 @@ class App {
     if (!playlist) return;
 
     const sortMode = this.state.playlistSortMode;
-    document
-      .getElementById('current-pl-sort-label')
-      .textContent = this.playlistSortOptions[sortMode] || '기본순';
+    const sortLabel = this.playlistSortOptions[sortMode] || '기본순';
+    document.getElementById('btn-open-pl-sort')?.setAttribute('aria-label', `정렬 (현재: ${sortLabel})`);
 
     let tracks =
       this.getTracksForPlaylist(
@@ -5537,10 +5600,11 @@ class App {
   modalAddMusicToPlaylist(
     playlist
   ) {
+    const existingTrackIds = new Set(playlist.trackIds);
     const unadded =
       this.state.tracks.filter(
         track =>
-          !playlist.trackIds.includes(
+          !existingTrackIds.has(
             track.id
           )
       );
@@ -5593,12 +5657,10 @@ class App {
         class="modal-body-scroll"
         style="max-height:350px">
 
-        <input
-          type="text"
-          id="pl-add-search"
-          class="form-input"
-          placeholder="곡 검색"
-          style="margin-bottom:12px">
+        <div class="library-search-wrapper">
+          <span class="material-symbols-rounded search-icon" aria-hidden="true">search</span>
+          <input type="text" id="pl-add-search" aria-label="추가할 곡 검색" placeholder="곡 검색" autocomplete="off">
+        </div>
 
         <div id="pl-add-list-container">
 
@@ -5688,7 +5750,7 @@ class App {
     playlist
   ) {
     const tracksHtml = playlist.trackIds.map(id => {
-      const track = this.state.tracks.find(t => t.id === id);
+      const track = this.getTrackById(id);
       if (!track) return '';
       return `
         <div class="drag-item playlist-drag-item" data-id="${track.id}">
@@ -5702,7 +5764,7 @@ class App {
     }).join('');
 
     this.showModal('플레이리스트 편집',
-      `<p class="editor-help-text">왼쪽의 = 버튼을 누른 상태로 위아래로 움직여 순서를 변경하세요.</p><div class="modal-body-scroll playlist-edit-scroll"><div id="drag-list">${tracksHtml || '<p>음악이 없습니다.</p>'}</div></div>`,
+      `<p class="editor-help-text">왼쪽 손잡이를 끌어 순서를 바꾸거나, 오른쪽 빼기 버튼으로 곡을 목록에서 빼세요.</p><div class="modal-body-scroll playlist-edit-scroll"><div id="drag-list">${tracksHtml || '<p>음악이 없습니다.</p>'}</div></div>`,
       async () => {
         const dragList = document.getElementById('drag-list');
         if (dragList) {
@@ -5954,7 +6016,7 @@ class App {
 
   getArtistTracksOrdered(artistName) {
     const all = this.state.tracks.filter(track => track.artist === artistName);
-    const orders = JSON.parse(localStorage.getItem('auraArtistTrackOrder') || '{}');
+    const orders = this.getStoredLocalObject('auraArtistTrackOrder');
     const saved = Array.isArray(orders[artistName]) ? orders[artistName] : [];
     const byId = new Map(all.map(track => [track.id, track]));
     const ordered = saved.map(id => byId.get(id)).filter(Boolean);
@@ -5972,14 +6034,13 @@ class App {
 
     this.state.artistSearchQuery = '';
     this.state.artistSortMode = 'default';
-    const tracks = this.getArtistTracksOrdered(artistName);
 
     document.getElementById('artist-search-input').value = '';
     this.renderArtistTracks(artistName);
 
     const artistCovers = this.getStoredLocalObject('auraArtistCovers');
     this.setCoverElement(
-      document.querySelector('#view-artist-detail .playlist-cover-large'),
+      document.getElementById('artist-detail-image'),
       artistCovers[artistName] || '',
       'person'
     );
@@ -6030,8 +6091,6 @@ class App {
     document.getElementById('artist-detail-sub').textContent = `${tracks.length}곡 • ${formatTotalTime(tracks)}`;
     container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>검색 결과가 없습니다.</p></div>';
     tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'artist', id: `artist:${artistName}`, name: artistName }, artworkLookup)));
-    const sortLabel = document.getElementById('current-artist-sort-label');
-    if (sortLabel) sortLabel.textContent = this.artistSortOptions[this.state.artistSortMode] || this.artistSortOptions.default;
     setTimeout(() => this.safeApplyMarquee(), 30);
   }
 
@@ -6074,6 +6133,16 @@ class App {
       overlay.classList.remove('active');
       this.openArtistCoverEditor(artistName);
     };
+    if (this.state.activeView === 'artist-detail' && this.state.artistDetailId === artistName) {
+      const sort = document.createElement('div');
+      sort.className = 'sheet-menu-item clickable';
+      sort.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">sort</span><span>곡 표시 순서</span>';
+      sort.onclick = () => {
+        overlay.classList.remove('active');
+        this.openArtistSortSheet();
+      };
+      list.appendChild(sort);
+    }
 
     overlay.classList.add('active');
     this.sendNativeMessage('overlay', { open: true, type: 'artist-sheet' });
@@ -6782,8 +6851,10 @@ class App {
   }
 
   safeApplyMarquee() {
-    requestAnimationFrame(
+    if (this._marqueeFrame) return;
+    this._marqueeFrame = requestAnimationFrame(
       () => {
+        this._marqueeFrame = 0;
         const viewports =
           document.querySelectorAll(
             '.track-title-viewport, .track-artist-viewport, .quick-title-viewport'
@@ -6798,51 +6869,27 @@ class App {
           viewport.classList.add('mini-marquee-viewport');
         });
 
-        [...viewports, ...miniViewports].forEach(
-          viewport => {
-            const content =
-              viewport.querySelector(
-                '.marquee-content'
-              );
+        const measurements = [];
+        for (const viewport of new Set([...viewports, ...miniViewports])) {
+          const content = viewport.querySelector('.marquee-content');
+          const width = viewport.clientWidth;
+          if (content && width) measurements.push({ content, distance: content.scrollWidth - width });
+        }
 
-            if (
-              !content ||
-              !viewport.clientWidth
-            ) {
-              return;
+        for (const { content, distance } of measurements) {
+          if (distance > 2) {
+            const scrollDistance = `-${distance}px`;
+            if (content.style.getPropertyValue('--scroll-dist') !== scrollDistance) {
+              content.style.setProperty('--scroll-dist', scrollDistance);
             }
-
-            const scrollDist =
-              content.scrollWidth -
-              viewport.clientWidth;
-
-            content.style.removeProperty('--scroll-dist');
+            content.style.removeProperty('transform');
+            content.classList.add('marquee-anim');
+          } else {
             content.classList.remove('marquee-anim');
-            if (scrollDist > 2) {
-              content.style.setProperty(
-                '--scroll-dist',
-                `-${scrollDist + 20}px`
-              );
-
-              if (
-                !content.classList.contains(
-                  'marquee-anim'
-                )
-              ) {
-                content.classList.add(
-                  'marquee-anim'
-                );
-              }
-            } else {
-              content.classList.remove(
-                'marquee-anim'
-              );
-
-              content.style.transform =
-                'translateX(0)';
-            }
+            content.style.removeProperty('--scroll-dist');
+            if (content.style.transform !== 'translateX(0)') content.style.transform = 'translateX(0)';
           }
-        );
+        }
       }
     );
   }
@@ -6905,7 +6952,9 @@ window.addEventListener('pagehide', () => {
 
 document.addEventListener('visibilitychange', () => {
   const app = window.app;
-  if (!app || !app.state?.currentTrackId) return;
+  if (!app) return;
+  app.player.setVisible(document.visibilityState === 'visible');
+  if (!app.state?.currentTrackId) return;
 
   if (document.visibilityState === 'hidden') {
     void app.persistPlaybackPosition(app.player.getCurrentTime());
