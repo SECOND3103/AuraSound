@@ -70,6 +70,7 @@ const APP_VERSION = '1.0.1';
 
 import { StorageManager } from './storage.js';
 import { AudioPlayer } from './audio-player.js';
+import { WebAudioPlayer } from './web-audio-player.js';
 import { NativeMusicStorage } from './native-storage.js';
 import {
   buildTrackSearchText,
@@ -137,8 +138,19 @@ window.alert = (message) => { void showAuraDialog(message); };
 
 class App {
   constructor() {
-    this.storage = new StorageManager();
-    this.player = new AudioPlayer();
+    this.browserAudio = !NativeMusicStorage.isAvailable() && typeof window.Audio === 'function';
+    this.storage = new StorageManager({ browserAudio: this.browserAudio });
+    this.player = this.browserAudio
+      ? new WebAudioPlayer(id => this.storage.getBrowserAudioFile(id))
+      : new AudioPlayer();
+    if (this.browserAudio) {
+      this.player.on('ended', id => window.__auraSoundNativeAction('ended', id));
+      this.player.on('playbackerror', error => {
+        alert(error.name === 'NotAllowedError'
+          ? '브라우저에서 재생을 시작하지 못했습니다. 재생 버튼을 다시 눌러 주세요.'
+          : '이 음악 파일을 재생할 수 없습니다. 파일이 저장되어 있는지와 브라우저가 지원하는 형식인지 확인해 주세요.');
+      });
+    }
     this.overlayStack = [];
     this.coverIconResizeObserver = null;
     this.coverIconMutationObserver = null;
@@ -991,7 +1003,7 @@ class App {
   }
 
   async resolveTrackDuration(track) {
-    let blob = track.fileBlob || null;
+    let blob = track.fileBlob || (this.browserAudio ? await this.storage.getBrowserAudioFile(track.id) : null);
 
     if (!blob && track.filePath && NativeMusicStorage.isAvailable()) {
       const duration = NativeMusicStorage.getDuration(track.filePath);
@@ -2883,7 +2895,12 @@ class App {
               delete track.fileBlob;
             }
 
-            await this.storage.saveTrack(track);
+            if (this.browserAudio) {
+              await this.storage.saveBrowserTrack(track);
+              delete track.fileBlob;
+            } else {
+              await this.storage.saveTrack(track);
+            }
             this.state.tracks.push(track);
           } catch (error) {
             console.error('[AuraSound Storage] 음악 저장 실패:', track.fileName, error);
@@ -3019,10 +3036,13 @@ class App {
     index = 0,
     sourceContext = null
   ) {
+    const playbackRequest = this.browserAudio ? (this.browserPlaybackRequest || 0) + 1 : null;
+    if (this.browserAudio) this.browserPlaybackRequest = playbackRequest;
     this.state.currentTrackId =
       track.id;
     this.state.currentPlaybackPosition = 0;
-    await this.player.loadTrack(track, 0, { skipNativeLoad: true });
+    const loaded = await this.player.loadTrack(track, 0, { skipNativeLoad: true });
+    if (loaded === false || (this.browserAudio && this.browserPlaybackRequest !== playbackRequest)) return;
 
     this.state.queue =
       queueList.length
@@ -3057,6 +3077,7 @@ class App {
       track
     );
 
+    if (this.browserAudio && this.browserPlaybackRequest !== playbackRequest) return;
     await this.storage.saveStateEntries([
       { key: 'lastTrackId', value: track.id },
       { key: 'lastPlaybackPosition', value: 0 },
@@ -3065,6 +3086,7 @@ class App {
       { key: 'sourcePlaylist', value: this.state.playbackContext }
     ]);
 
+    if (this.browserAudio && this.browserPlaybackRequest !== playbackRequest) return;
     this.player.play();
 
     this.updatePlayerUI(
@@ -6299,6 +6321,7 @@ class App {
         confirmButton.textContent = '초기화 중…';
 
         try {
+          if (this.browserAudio) this.player.setSrc('');
           this.player.stopTimeUpdates();
           this.player.currentTrackId = null;
           this.player.currentTime = 0;

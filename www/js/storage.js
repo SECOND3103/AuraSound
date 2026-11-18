@@ -2,13 +2,14 @@ const DB_NAME = 'music-player-db';
 const DB_VERSION = 2;
 
 export class StorageManager {
-  constructor() {
+  constructor({ browserAudio = false } = {}) {
     this.db = null;
+    this.browserAudio = browserAudio;
   }
 
   async init() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      const request = indexedDB.open(DB_NAME, DB_VERSION + Number(this.browserAudio));
 
       request.onupgradeneeded = (e) => {
         const db = e.target.result;
@@ -27,6 +28,10 @@ export class StorageManager {
 
         if (!db.objectStoreNames.contains('coverSources')) {
           db.createObjectStore('coverSources', { keyPath: 'id' });
+        }
+
+        if (this.browserAudio && !db.objectStoreNames.contains('audioFiles')) {
+          db.createObjectStore('audioFiles');
         }
       };
 
@@ -59,6 +64,18 @@ export class StorageManager {
     return this.saveTracks([track]);
   }
 
+  saveBrowserTrack(track) {
+    const { fileBlob, ...metadata } = track;
+    return this.runTransaction(['tracks', 'audioFiles'], 'readwrite', tx => {
+      tx.objectStore('tracks').put(metadata);
+      tx.objectStore('audioFiles').put(fileBlob, track.id);
+    });
+  }
+
+  getBrowserAudioFile(id) {
+    return this.runTransaction(['audioFiles'], 'readonly', tx => tx.objectStore('audioFiles').get(id));
+  }
+
   saveTracks(tracks) {
     return this.runTransaction(['tracks'], 'readwrite', tx => {
       const store = tx.objectStore('tracks');
@@ -74,7 +91,11 @@ export class StorageManager {
   }
 
   async deleteTrack(id) {
-    return this.runTransaction(['tracks'], 'readwrite', tx => { tx.objectStore('tracks').delete(id); });
+    const stores = this.browserAudio ? ['tracks', 'audioFiles'] : ['tracks'];
+    return this.runTransaction(stores, 'readwrite', tx => {
+      tx.objectStore('tracks').delete(id);
+      if (this.browserAudio) tx.objectStore('audioFiles').delete(id);
+    });
   }
 
   async savePlaylist(playlist) {
@@ -127,6 +148,7 @@ export class StorageManager {
 
   async clearAll() {
     const stores = ['tracks', 'playlists', 'appState', 'coverSources'];
+    if (this.browserAudio) stores.push('audioFiles');
 
     return this.runTransaction(stores, 'readwrite', tx => {
       for (const store of stores) tx.objectStore(store).clear();
