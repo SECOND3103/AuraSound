@@ -7,7 +7,7 @@
 }
 
 .collection-detail {
-  --detail-action-size: 52px;
+  --detail-action-size: 48px;
   --detail-bar-height: calc(60px + var(--safe-top));
   --detail-navigation-shift: clamp(0px, calc(var(--view-gutter) - 4px), 12px);
   min-height: 100%;
@@ -131,6 +131,57 @@
   padding-top: calc(var(--safe-top) + 14px);
 }
 
+:is(#view-playlist-detail, #view-album-detail) {
+  background: var(--bg-dark-base);
+}
+
+:is(.collection-detail--playlist, .collection-detail--album) .playlist-detail-header {
+  margin-inline: calc(-1 * var(--view-gutter));
+  padding-inline: var(--view-gutter);
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--detail-artwork-color, var(--bg-dark-elevated)) 70%, var(--bg-dark-base)), var(--bg-dark-base));
+}
+
+.collection-detail .playlist-detail-tools {
+  position: sticky;
+  top: var(--detail-bar-height);
+  z-index: 6;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  margin-inline: calc(-1 * var(--view-gutter));
+  padding: 12px var(--view-gutter);
+  background: var(--bg-dark-base);
+}
+
+.playlist-detail-tools .library-sort-btn {
+  flex: none;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 0;
+  background: #282828;
+}
+
+.collection-detail .track-row { padding-inline: 0; }
+#view-playlist-detail .library-search-wrapper {
+  min-height: 36px;
+  height: 36px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 12%);
+  gap: 6px;
+}
+#view-playlist-detail .library-search-wrapper .search-icon { color: white; }
+#view-playlist-detail .library-search-wrapper input::placeholder { color: white; font-weight: 650; }
+#view-playlist-detail {
+  background: linear-gradient(to bottom, var(--detail-artwork-color, var(--bg-dark-elevated)), var(--bg-dark-base) 560px);
+}
+#view-playlist-detail .playlist-detail-header { background: transparent; }
+#view-artist-detail {
+  background: linear-gradient(to bottom, var(--detail-artwork-color, var(--bg-dark-elevated)) 180px, var(--bg-dark-base) 540px);
+}
+
+@media (width < 840px) {
+  .collection-detail .playlist-cover-large { width: min(58vw, 256px); }
+}
+
 .collection-detail--playlist .playlist-cover-large {
   transform: translateY(var(--playlist-cover-offset, 0px)) scale(var(--playlist-cover-scale, 1));
   transform-origin: center top;
@@ -160,7 +211,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgb(0 0 0 / 22%), transparent 28%, var(--bg-dark-base));
+  background: linear-gradient(180deg, rgb(0 0 0 / 22%), transparent 28%, color-mix(in srgb, var(--detail-artwork-color, var(--bg-dark-base)) 55%, var(--bg-dark-base)));
 }
 
 .detail-artist-banner img {
@@ -181,18 +232,47 @@
   margin-top: -64px;
 }
 
+.album-artist-row { display: flex; align-items: center; gap: 8px; margin-block: 12px; }
+#album-artist-avatar { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; overflow: hidden; background: #333; }
+#album-artist-avatar img { width: 100%; height: 100%; object-fit: cover; }
+#album-artist-avatar span { font-size: 16px; }
+#view-album-detail .album-artist-row #album-detail-artist { font-size: .875rem; font-weight: 700; color: white; }
+
 #view-folder-detail > .btn-back {
   width: 44px;
   justify-content: center;
 }
 
-@media (min-width: 700px) {
-  .detail-view-open .content-area {
-    grid-row: 1 / -1;
-  }
+@media (min-width: 840px) {
   .collection-detail:not(.collection-detail--artist) .playlist-detail-header {
     padding-top: var(--detail-bar-height);
   }
+
+  #view-playlist-detail {
+    --show-playlist-search: 1;
+  }
+  :is(#view-playlist-detail, #view-album-detail) > :is(.detail-search-panel, .playlist-detail-header, .playlist-detail-tools, .track-list) {
+    width: min(100%, 640px);
+    margin-inline: auto;
+    padding-inline: 0;
+  }
+  #view-playlist-detail .detail-search-panel {
+    min-height: 0;
+    padding-block: 64px 0;
+  }
+  :is(#view-playlist-detail, #view-album-detail) .playlist-detail-header {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "cover" "info" "actions";
+    padding-top: 40px;
+    gap: 16px;
+    background: transparent;
+  }
+  #view-playlist-detail .playlist-cover-large { width: min(48cqw, 256px); }
+  #view-playlist-detail .playlist-meta-info h2, #view-album-detail #album-detail-title { font-size: 1.5rem; }
+  #view-album-detail { background: linear-gradient(color-mix(in srgb, var(--detail-artwork-color, #282828) 50%, #121212), #121212 460px); }
+  #view-album-detail .playlist-detail-header { padding-top: 21px; gap: 20px; }
+  #view-album-detail .playlist-cover-large { width: min(48cqw, 248px); }
+  #view-album-detail .track-row { min-height: 64px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

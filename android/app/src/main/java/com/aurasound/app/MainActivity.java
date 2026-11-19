@@ -7,7 +7,12 @@ import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.media.MediaMetadataRetriever;
+import android.media.MediaRouter;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -71,6 +76,59 @@ public class MainActivity extends BridgeActivity {
     private String pendingBackupJson;
     private final ArrayDeque<Consumer<MediaController>> pendingPlayerCommands = new ArrayDeque<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final AudioAttributes musicAttributes = new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build();
+    private final MediaRouter.SimpleCallback mediaRouteChanges = new MediaRouter.SimpleCallback() {
+        @Override public void onRouteSelected(MediaRouter router, int type, MediaRouter.RouteInfo route) { updateAudioOutput(); }
+        @Override public void onRouteChanged(MediaRouter router, MediaRouter.RouteInfo route) { updateAudioOutput(); }
+    };
+    private final AudioDeviceCallback audioDeviceChanges = new AudioDeviceCallback() {
+        @Override public void onAudioDevicesAdded(AudioDeviceInfo[] devices) { updateAudioOutput(); }
+        @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] devices) { updateAudioOutput(); }
+    };
+
+    private void updateAudioOutput() {
+        AudioManager audio = getSystemService(AudioManager.class);
+        MediaRouter router = getSystemService(MediaRouter.class);
+        MediaRouter.RouteInfo route = router.getSelectedRoute(MediaRouter.ROUTE_TYPE_LIVE_AUDIO);
+        boolean bluetoothRoute = route != null && route.getDeviceType() == MediaRouter.RouteInfo.DEVICE_TYPE_BLUETOOTH;
+        String kind = "";
+        CharSequence name = "";
+        java.util.List<AudioDeviceInfo> devices = Build.VERSION.SDK_INT >= 33
+                ? audio.getAudioDevicesForAttributes(musicAttributes) : java.util.Collections.emptyList();
+        for (AudioDeviceInfo device : devices) {
+            switch (device.getType()) {
+                case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                case AudioDeviceInfo.TYPE_BLE_HEADSET:
+                case AudioDeviceInfo.TYPE_HEARING_AID:
+                    kind = "bluetooth";
+                    name = bluetoothRoute ? route.getName() : device.getProductName();
+                    break;
+                case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+                case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+                case AudioDeviceInfo.TYPE_USB_HEADSET:
+                    kind = "wired";
+                    name = "유선 이어폰";
+                    break;
+                default: continue;
+            }
+            break;
+        }
+        if (devices.isEmpty()) {
+            if (bluetoothRoute) {
+                kind = "bluetooth";
+                name = route.getName();
+            } else if (audio.isWiredHeadsetOn()) {
+                kind = "wired";
+                name = "유선 이어폰";
+            }
+        }
+        if (kind.equals("bluetooth") && (name == null || name.length() == 0)) name = "블루투스 오디오";
+        getBridge().getWebView().evaluateJavascript("window.app?.setAudioOutput("
+                + JSONObject.quote(kind) + "," + JSONObject.quote(name.toString()) + ","
+                + (Build.VERSION.SDK_INT >= 34) + ")", null);
+    }
 
     @Override
     public void onCreate(Bundle bundle) {
@@ -368,6 +426,9 @@ public class MainActivity extends BridgeActivity {
                         mediaController.seekTo(mediaController.getCurrentMediaItemIndex(), Math.max(0L, Math.round(jSONObject.optDouble("position", 0.0d) * 1000.0d)));
                         mediaController.prepare();
                         mediaController.pause();
+                    } else {
+                        sendPlaybackState(mediaController.isPlaying(), mediaController.getCurrentPosition(),
+                                Math.max(0L, mediaController.getDuration()), mediaController.getPlaybackParameters().speed, str2);
                     }
                 } else {
                     boolean zIsPlaying = mediaController.isPlaying();
@@ -427,10 +488,15 @@ public class MainActivity extends BridgeActivity {
     public void onStart() {
         super.onStart();
         connectToPlaybackService();
+        getSystemService(MediaRouter.class).addCallback(MediaRouter.ROUTE_TYPE_LIVE_AUDIO, mediaRouteChanges);
+        getSystemService(AudioManager.class).registerAudioDeviceCallback(audioDeviceChanges, mainHandler);
+        updateAudioOutput();
     }
 
     @Override
     public void onStop() {
+        getSystemService(MediaRouter.class).removeCallback(mediaRouteChanges);
+        getSystemService(AudioManager.class).unregisterAudioDeviceCallback(audioDeviceChanges);
         releaseMediaController();
         super.onStop();
     }
@@ -703,7 +769,7 @@ public class MainActivity extends BridgeActivity {
             try {
                 ZipOutputStream zipOutputStream = new ZipOutputStream(outputStreamOpenOutputStream);
                 try {
-                    writeTextEntry(zipOutputStream, "manifest.json", new JSONObject().put("format", "AuraSoundBackup").put("version", 1).put("appVersion", "1.0.1").toString());
+                    writeTextEntry(zipOutputStream, "manifest.json", new JSONObject().put("format", "AuraSoundBackup").put("version", 1).put("appVersion", "1.0.2").toString());
                     writeTextEntry(zipOutputStream, "tracks.json", jSONArrayOptJSONArray.toString());
                     String string = "[]";
                     writeTextEntry(zipOutputStream, "playlists.json", jSONObject.optJSONArray("playlists") == null ? "[]" : jSONObject.optJSONArray("playlists").toString());
@@ -1092,29 +1158,10 @@ public class MainActivity extends BridgeActivity {
                     options2.inPreferredConfig = Bitmap.Config.ARGB_8888;
                     bitmap = BitmapFactory.decodeByteArray(bArrDecode, 0, bArrDecode.length, options2);
                     if (bitmap != null) {
-                        Palette paletteGenerate = Palette.from(bitmap).maximumColorCount(16).generate();
-                        int dominantColor = paletteGenerate.getDominantColor(iRgb);
-                        Palette.Swatch vibrantSwatch = paletteGenerate.getVibrantSwatch();
-                        if (vibrantSwatch == null) {
-                            vibrantSwatch = paletteGenerate.getDarkVibrantSwatch();
-                        }
-                        if (vibrantSwatch == null) {
-                            vibrantSwatch = paletteGenerate.getLightVibrantSwatch();
-                        }
-                        if (vibrantSwatch == null) {
-                            vibrantSwatch = paletteGenerate.getMutedSwatch();
-                        }
-                        if (vibrantSwatch != null) {
-                            dominantColor = vibrantSwatch.getRgb();
-                        }
-                        float[] fArr = new float[3];
-                        Color.colorToHSV(dominantColor, fArr);
-                        if (vibrantSwatch != null) {
-                            fArr[1] = Math.max(0.58f, fArr[1]);
-                            fArr[2] = Math.max(0.3f, Math.min(0.48f, fArr[2] * 0.86f));
-                            dominantColor = Color.HSVToColor(fArr);
-                        }
-                        return String.format(Locale.US, "#%06X", Integer.valueOf(dominantColor & 0xFFFFFF));
+                        Palette palette = Palette.from(bitmap).maximumColorCount(24).generate();
+                        int accent = palette.getDarkVibrantColor(palette.getVibrantColor(
+                                palette.getDarkMutedColor(palette.getMutedColor(palette.getDominantColor(iRgb)))));
+                        return String.format(Locale.US, "#%06X", accent & 0xFFFFFF);
                     }
                     return "#191414";
                 }
@@ -1131,6 +1178,18 @@ public class MainActivity extends BridgeActivity {
 
     public class AuraSoundBridge {
         public AuraSoundBridge() {
+        }
+
+        @JavascriptInterface
+        public void requestAudioOutput() {
+            runOnUiThread(MainActivity.this::updateAudioOutput);
+        }
+
+        @JavascriptInterface
+        public void openAudioOutput() {
+            if (Build.VERSION.SDK_INT >= 34) {
+                runOnUiThread(() -> android.media.MediaRouter2.getInstance(MainActivity.this).showSystemOutputSwitcher());
+            }
         }
 
         @JavascriptInterface

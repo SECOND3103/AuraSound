@@ -55,6 +55,7 @@ export class AudioPlayer {
       if (activeTrackId && String(nativeTrackId || '') !== String(activeTrackId)) {
         return;
       }
+      const sameTrack = String(nativeTrackId) === String(this.currentTrackId);
       if (nativeTrackId) {
         this.currentTrackId = String(nativeTrackId);
         this.src = `native://${nativeTrackId}`;
@@ -63,7 +64,8 @@ export class AudioPlayer {
       this.clockRunning = Boolean(playing);
       this.lastStatePosition = Math.max(0, positionMs / 1000);
       this.currentTime = this.lastStatePosition;
-      this.duration = Math.max(0, durationMs / 1000);
+      if (durationMs > 0) this.duration = durationMs / 1000;
+      else if (!sameTrack) this.duration = 0;
       this.playbackRate = playbackSpeed > 0 ? playbackSpeed : 1;
       this.lastStateAt = performance.now();
 

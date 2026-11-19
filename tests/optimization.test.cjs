@@ -249,6 +249,18 @@ test('native playback reports keep time accurate without repeating state notific
   assert.deepEqual(states, [true, false, true]);
 });
 
+test('an unknown native duration preserves the loaded track length while position advances', async () => {
+  const { app, window, advance } = loadApp();
+  app.state.currentTrackId = 'b';
+  await app.player.loadTrack({ id: 'b', filePath: 'Music/b', duration: 60 }, 0, { skipNativeLoad: true });
+  window.__auraSoundNativePlaybackState(true, 1250, 0, 1, 'b');
+  advance(250);
+  assert.equal(app.player.audio.currentTime, 1.5);
+  assert.equal(app.player.audio.duration, 60);
+  window.__auraSoundNativePlaybackState(true, 1500, 62000, 1, 'b');
+  assert.equal(app.player.audio.duration, 62);
+});
+
 test('hidden UI stops its timer while native time continues and resumes correctly', () => {
   const { app, window, document, advance, timers } = loadApp();
   app.state.currentTrackId = 'a';
@@ -316,7 +328,8 @@ test('marquee requests coalesce and measure all widths before writing styles', (
     const properties = new Map();
     const classes = new Set();
     const content = {
-      get scrollWidth() { events.push('read'); return scrollWidth; },
+      get offsetWidth() { events.push('read'); return scrollWidth; },
+      children: [], dataset: {}, textContent: 'Track title',
       classList: {
         add(value) { events.push('write'); classes.add(value); },
         remove(value) { events.push('write'); classes.delete(value); }
@@ -335,13 +348,15 @@ test('marquee requests coalesce and measure all widths before writing styles', (
   assert.equal(frames.size, 1);
   flushFrames();
   assert.ok(events.lastIndexOf('read') < events.indexOf('write'));
-  assert.equal(wide.content.style.getPropertyValue('--scroll-dist'), '-80px');
+  assert.equal(wide.content.style.getPropertyValue('--scroll-dist'), '-212px');
+  assert.equal(wide.content.dataset.marqueeText, 'Track title');
+  assert.equal(short.content.dataset.marqueeText, undefined);
   assert.ok(wide.classes.has('marquee-anim'));
   assert.ok(!short.classes.has('marquee-anim'));
   events.length = 0;
   app.safeApplyMarquee(); flushFrames();
   assert.ok(wide.classes.has('marquee-anim'));
-  assert.equal(wide.content.style.getPropertyValue('--scroll-dist'), '-80px');
+  assert.equal(wide.content.style.getPropertyValue('--scroll-dist'), '-212px');
 });
 
 function controlledStorage() {

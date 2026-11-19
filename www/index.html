@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>AuraSound - Offline Music Player</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,1,0" />
-  <link rel="stylesheet" href="style.css?v=1.0.1">
-  <link rel="stylesheet" href="detail.css?v=1.0.1">
+  <link rel="stylesheet" href="style.css?v=1.0.2">
+  <link rel="stylesheet" href="detail.css?v=1.0.2">
 </head>
 <body>
+  <div id="playback-shell">
   <div id="app">
     <!-- Top Header Bar -->
     <header class="app-header" id="app-header">
@@ -83,17 +84,16 @@
           </div>
           
           <div class="view-sort-group">
-            <div class="view-toggle">
-              <button class="btn-icon view-btn active clickable" id="btn-view-list" aria-label="목록 보기"><span class="material-symbols-rounded">view_list</span></button>
-              <button class="btn-icon view-btn clickable" id="btn-view-grid" aria-label="그리드 보기"><span class="material-symbols-rounded">grid_view</span></button>
-            </div>
-            <button class="library-select-btn clickable" id="btn-select" aria-label="곡 선택">
-          <span class="material-symbols-rounded">checklist</span>
-          <span>선택</span>
-        </button>
-        <button class="library-sort-btn clickable" id="btn-open-sort">
+            <button class="library-sort-btn clickable" id="btn-open-sort">
               <span class="material-symbols-rounded sort-icon">sort</span>
               <span id="current-sort-label">최근 추가순</span>
+            </button>
+            <button class="library-select-btn clickable" id="btn-select" aria-label="곡 선택">
+              <span class="material-symbols-rounded">checklist</span>
+              <span>선택</span>
+            </button>
+            <button type="button" class="btn-icon clickable" id="btn-library-layout" aria-label="그리드 보기">
+              <span class="material-symbols-rounded" aria-hidden="true">grid_view</span>
             </button>
           </div>
         </div>
@@ -119,7 +119,7 @@
         <div class="detail-search-panel detail-search-panel--above-cover">
           <div class="library-search-wrapper">
             <span class="material-symbols-rounded search-icon" aria-hidden="true">search</span>
-            <input type="text" id="playlist-search-input" aria-label="플레이리스트 내 검색" placeholder="플레이리스트 내 검색" autocomplete="off">
+            <input type="text" id="playlist-search-input" aria-label="플레이리스트에서 찾기" placeholder="플레이리스트에서 찾기" autocomplete="off">
             <button class="btn-icon hidden clickable" id="btn-clear-playlist-search" aria-label="검색어 지우기"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
           </div>
         </div>
@@ -141,8 +141,8 @@
         </div>
         <div class="playlist-detail-tools" aria-label="플레이리스트 편집 도구">
           <button type="button" class="library-sort-btn clickable" id="btn-detail-pl-add"><span class="material-symbols-rounded" aria-hidden="true">add</span><span>추가</span></button>
-          <button type="button" class="library-sort-btn clickable" id="btn-detail-pl-edit"><span class="material-symbols-rounded" aria-hidden="true">edit</span><span>수정</span></button>
-          <button type="button" class="library-sort-btn clickable" id="btn-detail-pl-info"><span class="material-symbols-rounded" aria-hidden="true">info</span><span>이름 및 세부 정보</span></button>
+          <button type="button" class="library-sort-btn clickable" id="btn-detail-pl-edit"><span class="material-symbols-rounded" aria-hidden="true">reorder</span><span>수정</span></button>
+          <button type="button" class="library-sort-btn clickable" id="btn-detail-pl-info"><span class="material-symbols-rounded" aria-hidden="true">edit</span><span>이름 및 세부 정보</span></button>
           <button type="button" class="library-sort-btn clickable" id="btn-open-pl-sort"><span class="material-symbols-rounded" aria-hidden="true">sort</span><span>정렬</span></button>
         </div>
 
@@ -178,18 +178,11 @@
             </button>
           </div>
         </div>
-        <div class="detail-search-panel">
-          <div class="library-search-wrapper">
-            <span class="material-symbols-rounded search-icon" aria-hidden="true">search</span>
-            <input type="text" id="artist-search-input" aria-label="아티스트 내 검색" placeholder="아티스트 내 검색" autocomplete="off">
-            <button class="btn-icon hidden clickable" id="btn-clear-artist-search" aria-label="검색어 지우기"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
-          </div>
-        </div>
         <div class="track-list" id="artist-tracks-container"></div>
       </section>
 
       <!-- Album Detail View -->
-      <section id="view-album-detail" class="view collection-detail">
+      <section id="view-album-detail" class="view collection-detail collection-detail--album">
         <div class="detail-navigation">
           <button class="btn-back clickable" id="btn-album-back" aria-label="뒤로가기">
             <span class="material-symbols-rounded" aria-hidden="true">arrow_back</span>
@@ -210,7 +203,7 @@
           </div>
           <div class="playlist-meta-info">
             <div class="track-title-viewport"><h2 class="marquee-content" id="album-detail-title">앨범</h2></div>
-            <p id="album-detail-artist"></p>
+            <div class="album-artist-row"><span id="album-artist-avatar" aria-hidden="true"></span><span id="album-detail-artist"></span></div>
             <p id="album-detail-sub">0곡</p>
           </div>
           <div class="playlist-action-btns">
@@ -218,13 +211,6 @@
               <span class="material-symbols-rounded">shuffle</span>
             </button>
             <span class="detail-play-slot" aria-hidden="true"></span>
-          </div>
-        </div>
-        <div class="detail-search-panel">
-          <div class="library-search-wrapper">
-            <span class="material-symbols-rounded search-icon" aria-hidden="true">search</span>
-            <input type="text" id="album-search-input" aria-label="앨범 내 검색" placeholder="앨범 내 검색" autocomplete="off">
-            <button class="btn-icon hidden clickable" id="btn-clear-album-search" aria-label="검색어 지우기"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
           </div>
         </div>
         <div class="track-list" id="album-tracks-container"></div>
@@ -293,7 +279,7 @@
               <div class="settings-item">
                 <div class="settings-item-text">
                   <div class="title">앱 정보</div>
-                  <div class="desc">AuraSound v1.0.1</div>
+                  <div class="desc">AuraSound v1.0.2</div>
                 </div>
               </div>
             </div>
@@ -302,19 +288,23 @@
       </section>
     </main>
 
+  </div>
+
     <!-- Mini Player -->
     <div class="mini-player hidden" id="mini-player">
       <div class="mini-progress-bar" id="mini-progress-fill"></div>
       
-      <div class="mini-player-body clickable" id="mini-player-clickable">
-        <div class="mini-album-art"><span class="material-symbols-rounded">music_note</span></div>
-        <div class="mini-info">
-          <div class="track-title-viewport"><div class="marquee-content mini-title" id="mini-title">재생 중인 곡 없음</div></div>
-          <div class="track-artist-viewport"><div class="marquee-content mini-artist" id="mini-artist">-</div></div>
-        </div>
-      </div>
+      <button type="button" class="mini-player-body clickable" id="mini-player-clickable" aria-controls="full-player">
+        <span class="mini-album-art" aria-hidden="true"><span class="material-symbols-rounded">music_note</span></span>
+        <span class="mini-info">
+          <span class="track-title-viewport mini-marquee-viewport"><span class="marquee-content"><span class="mini-title" id="mini-title">재생 중인 곡 없음</span><span class="mini-separator" aria-hidden="true">•</span><span class="mini-inline-artist" id="mini-inline-artist"></span></span></span>
+          <span class="mini-artist-line" id="mini-artist"></span>
+          <span class="mini-output-label"><span class="material-symbols-rounded" id="mini-output-symbol" aria-hidden="true"></span> <span id="mini-output-name"></span></span>
+        </span>
+      </button>
       
       <div class="mini-controls">
+        <button type="button" class="btn-icon" id="mini-output" aria-label="이 기기에서 재생" disabled><span class="material-symbols-rounded" aria-hidden="true">devices</span></button>
         <button class="btn-icon clickable" id="btn-mini-more" aria-label="옵션">
           <span class="material-symbols-rounded">more_vert</span>
         </button>
@@ -332,75 +322,25 @@
       <button class="nav-btn clickable" data-target-view="library" aria-label="보관함">
         <span class="material-symbols-rounded">library_music</span><span>보관함</span>
       </button>
-      <button class="nav-btn clickable" id="btn-nav-create" aria-label="만들기 메뉴 열기">
+      <button class="nav-btn clickable" id="btn-nav-create" aria-controls="create-sheet-overlay" aria-expanded="false" aria-label="만들기 메뉴 열기">
         <span class="material-symbols-rounded create-nav-icon">add</span><span class="create-nav-label">만들기</span>
       </button>
     </nav>
-  </div>
-
-  <div class="bottom-sheet-overlay create-sheet-overlay" id="create-sheet-overlay">
-    <div class="bottom-sheet create-sheet" role="dialog" aria-modal="true" aria-label="만들기 메뉴">
-      <div class="create-sheet-options">
-        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-playlist">
-          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">queue_music</span>
-          <span class="create-menu-copy">
-            <strong>플레이리스트</strong>
-            <span>좋아하는 곡을 한곳에 모아 보세요.</span>
-          </span>
-        </button>
-        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-music">
-          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">audio_file</span>
-          <span class="create-menu-copy">
-            <strong>음악 추가</strong>
-            <span>이 기기의 음악을 보관함에 담으세요.</span>
-          </span>
-        </button>
-        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-import">
-          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">backup</span>
-          <span class="create-menu-copy">
-            <strong>불러오기</strong>
-            <span>백업에 저장한 음악과 플레이리스트를 가져오세요.</span>
-          </span>
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <div class="bottom-sheet-overlay" id="library-add-sheet-overlay">
-    <div class="bottom-sheet library-add-sheet" role="dialog" aria-modal="true" aria-labelledby="library-add-title">
-      <div class="sheet-handle"></div>
-      <div class="sheet-header"><h3 id="library-add-title">보관함에 추가</h3></div>
-      <div class="sheet-menu-list">
-        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-playlist"><span class="material-symbols-rounded" aria-hidden="true">queue_music</span><span>플레이리스트</span></button>
-        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-music"><span class="material-symbols-rounded" aria-hidden="true">audio_file</span><span>음악 추가</span></button>
-        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-import"><span class="material-symbols-rounded" aria-hidden="true">backup</span><span>불러오기</span></button>
-      </div>
-    </div>
-  </div>
-
-  <div class="profile-drawer-overlay" id="profile-drawer-overlay">
-    <aside class="profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-drawer-title">
-      <div class="profile-drawer-top">
-        <div class="profile-avatar-large"><span class="material-symbols-rounded" aria-hidden="true">person</span></div>
-        <div class="profile-drawer-title" id="profile-drawer-title">프로필</div>
-        <button type="button" class="btn-icon clickable profile-drawer-close" id="btn-close-profile-drawer" aria-label="프로필 메뉴 닫기">
-          <span class="material-symbols-rounded" aria-hidden="true">close</span>
-        </button>
-      </div>
-      <div class="profile-drawer-menu">
-        <button type="button" class="profile-drawer-item clickable" id="btn-profile-settings">
-          <span class="material-symbols-rounded" aria-hidden="true">settings</span><span>설정</span>
-        </button>
-      </div>
-    </aside>
-  </div>
 
   <!-- Full Screen Player Overlay -->
   <div class="full-player" id="full-player">
     <div class="full-player-header">
-      <button class="btn-icon clickable" id="btn-close-full-player" aria-label="닫기">
-        <span class="material-symbols-rounded">keyboard_arrow_down</span>
-      </button>
+      <div class="player-view-controls">
+        <button type="button" class="btn-icon clickable" id="btn-expand-player" aria-label="전체 화면으로 펼치기" aria-pressed="false">
+          <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2.5" y="3" width="19" height="18" rx="1.5"/>
+            <path d="M16 3v18m-4-13-4 4 4 4"/>
+          </svg>
+        </button>
+        <button class="btn-icon clickable" id="btn-close-full-player" aria-label="닫기">
+          <span class="material-symbols-rounded">keyboard_arrow_down</span>
+        </button>
+      </div>
       <div class="full-player-heading" id="full-player-heading">지금 재생 중</div>
       <button type="button" class="btn-icon clickable" id="btn-full-more" aria-label="현재 곡 옵션">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
@@ -461,6 +401,64 @@
         </button>
       </div>
     </div>
+  </div>
+  </div>
+
+  <div class="bottom-sheet-overlay create-sheet-overlay" id="create-sheet-overlay">
+    <div class="bottom-sheet create-sheet" role="dialog" aria-modal="true" aria-label="만들기 메뉴">
+      <div class="create-sheet-options">
+        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-playlist">
+          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">queue_music</span>
+          <span class="create-menu-copy">
+            <strong>플레이리스트</strong>
+            <span>좋아하는 곡을 한곳에 모아 보세요.</span>
+          </span>
+        </button>
+        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-music">
+          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">audio_file</span>
+          <span class="create-menu-copy">
+            <strong>음악 추가</strong>
+            <span>이 기기의 음악을 보관함에 담으세요.</span>
+          </span>
+        </button>
+        <button type="button" class="sheet-menu-item create-menu-item clickable" id="btn-create-import">
+          <span class="create-menu-icon material-symbols-rounded" aria-hidden="true">backup</span>
+          <span class="create-menu-copy">
+            <strong>불러오기</strong>
+            <span>백업에 저장한 음악과 플레이리스트를 가져오세요.</span>
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-sheet-overlay" id="library-add-sheet-overlay">
+    <div class="bottom-sheet library-add-sheet" role="dialog" aria-modal="true" aria-labelledby="library-add-title">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><h3 id="library-add-title">보관함에 추가</h3></div>
+      <div class="sheet-menu-list">
+        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-playlist"><span class="material-symbols-rounded" aria-hidden="true">queue_music</span><span>플레이리스트</span></button>
+        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-music"><span class="material-symbols-rounded" aria-hidden="true">audio_file</span><span>음악 추가</span></button>
+        <button type="button" class="sheet-menu-item clickable" id="btn-library-add-import"><span class="material-symbols-rounded" aria-hidden="true">backup</span><span>불러오기</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="profile-drawer-overlay" id="profile-drawer-overlay">
+    <aside class="profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-drawer-title">
+      <div class="profile-drawer-top">
+        <div class="profile-avatar-large"><span class="material-symbols-rounded" aria-hidden="true">person</span></div>
+        <div class="profile-drawer-title" id="profile-drawer-title">프로필</div>
+        <button type="button" class="btn-icon clickable profile-drawer-close" id="btn-close-profile-drawer" aria-label="프로필 메뉴 닫기">
+          <span class="material-symbols-rounded" aria-hidden="true">close</span>
+        </button>
+      </div>
+      <div class="profile-drawer-menu">
+        <button type="button" class="profile-drawer-item clickable" id="btn-profile-settings">
+          <span class="material-symbols-rounded" aria-hidden="true">settings</span><span>설정</span>
+        </button>
+      </div>
+    </aside>
   </div>
 
   <!-- Sort Menu Bottom Sheet -->
@@ -584,6 +582,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=1.0.1"></script>
+  <script type="module" src="./js/app.js?v=1.0.2"></script>
 </body>
 </html>

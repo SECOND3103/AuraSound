@@ -44,6 +44,7 @@ window.__auraSoundNativeAction = function(action, value) {
         window.app.state.currentPlaybackPosition = 0;
         window.app.player.currentTrackId = track.id;
         window.app.player.src = `native://${track.id}`;
+        window.app.player.duration = Number(track.duration) || 0;
         window.app.player.currentTime = 0;
         window.app.player.lastStatePosition = 0;
         window.app.player.lastStateAt = performance.now();
@@ -66,7 +67,8 @@ window.__auraSoundNativeAction = function(action, value) {
   }
 };
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
+const SPLIT_PLAYER_QUERY = '(min-width: 840px)';
 
 import { StorageManager } from './storage.js';
 import { AudioPlayer } from './audio-player.js';
@@ -190,12 +192,10 @@ class App {
 
       artistDetailId: null,
       albumDetailId: null,
-      albumSearchQuery: '',
       folderDetailId: null,
 
       playlistSortMode: 'default',
       artistSortMode: 'default',
-      artistSearchQuery: '',
 
       selectionMode: false,
       selectedTrackIds: new Set(),
@@ -454,7 +454,15 @@ class App {
     document.documentElement.setAttribute('data-theme', 'dark');
   }
 
+
   bindEvents() {
+    const updateHoverInput = event => {
+      const hovering = event.pointerType === 'mouse' || (event.pointerType === 'pen' && event.buttons === 0);
+      document.documentElement.classList.toggle('can-hover', hovering);
+    };
+    for (const type of ['pointerover', 'pointerdown', 'pointermove']) {
+      document.addEventListener(type, updateHoverInput, { capture: true, passive: true });
+    }
     document
       .querySelectorAll('.nav-btn[data-target-view]')
       .forEach(btn => {
@@ -476,7 +484,7 @@ class App {
       this.closeProfileDrawer();
       this.switchView('settings');
     });
-    document.getElementById('btn-settings-back')?.addEventListener('click', () => this.handleBackNavigation());
+    document.getElementById('btn-settings-back')?.addEventListener('click', () => this.backFromSettings());
     document.getElementById('btn-nav-create')?.addEventListener('click', () => this.toggleCreateMenu());
     document.getElementById('btn-library-add')?.addEventListener('click', () => {
       const overlay = document.getElementById('library-add-sheet-overlay');
@@ -601,14 +609,6 @@ class App {
         );
       });
 
-    this.bindDetailSearch('artist-search-input', 'btn-clear-artist-search', query => {
-      this.state.artistSearchQuery = query;
-      this.renderArtistTracks(this.state.artistDetailId);
-    });
-    this.bindDetailSearch('album-search-input', 'btn-clear-album-search', query => {
-      this.state.albumSearchQuery = query;
-      this.renderAlbumTracks(this.state.albumDetailId);
-    });
     this.bindDetailSearch('playlist-search-input', 'btn-clear-playlist-search', query => {
       if (this.state.activePlaylistId) {
         this.renderPlaylistTracks(this.getPlaylist(this.state.activePlaylistId), query);
@@ -642,19 +642,9 @@ class App {
       });
     }
 
-    document
-      .getElementById('btn-view-list')
-      .addEventListener(
-        'click',
-        () => this.setViewMode('list')
-      );
-
-    document
-      .getElementById('btn-view-grid')
-      .addEventListener(
-        'click',
-        () => this.setViewMode('grid')
-      );
+    document.getElementById('btn-library-layout').addEventListener('click', () => {
+      this.setViewMode(this.state.activeViewMode === 'grid' ? 'list' : 'grid');
+    });
 
     document
       .getElementById('btn-select')
@@ -684,6 +674,22 @@ class App {
         if (current) this.openTrackContextMenu(current);
       });
     }
+
+    document.getElementById('mini-output').addEventListener('click', () => window.AuraSoundNative?.openAudioOutput?.());
+    window.AuraSoundNative?.requestAudioOutput?.();
+    const playerLayout = window.matchMedia(SPLIT_PLAYER_QUERY);
+    const fullPlayer = document.getElementById('full-player');
+    document.getElementById('btn-expand-player').addEventListener('click', () => {
+      if (playerLayout.matches && fullPlayer.classList.contains('active') && !fullPlayer.classList.contains('is-dismissing')) {
+        this.setPlayerExpanded(!fullPlayer.classList.contains('player-expanded'));
+      }
+    });
+    playerLayout.addEventListener('change', () => {
+      this.setPlayerExpanded(false);
+    });
+    fullPlayer.addEventListener('transitionend', event => {
+      if (event.target === fullPlayer && event.propertyName === 'width') this.safeApplyMarquee();
+    });
 
     const toggle = e => {
       e.stopPropagation();
@@ -766,9 +772,7 @@ class App {
     this.player.on(
       'timeupdate',
       ({ currentTime, duration }) => {
-        if (!duration) return;
-
-        const pct = Math.max(0, Math.min(100, (currentTime / duration) * 100));
+        const pct = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
         latestTimeUiState = { currentTime, duration, pct };
 
         if (!timeUiFrame) {
@@ -806,7 +810,7 @@ class App {
         }
 
         if (
-          now - lastMediaPositionUpdate >= 500 &&
+          duration > 0 && now - lastMediaPositionUpdate >= 500 &&
           !window.AuraSoundNative &&
           'mediaSession' in navigator &&
           'setPositionState' in navigator.mediaSession
@@ -1719,6 +1723,7 @@ class App {
       document
         .getElementById('mini-player')
         .classList.add('hidden');
+      this.closeFullPlayer();
     }
 
     this.state.queue =
@@ -1733,6 +1738,19 @@ class App {
     this.syncNativeQueue();
   }
 
+  setAudioOutput(kind, name, canSwitch) {
+    const connected = kind === 'bluetooth' || kind === 'wired';
+    const player = document.getElementById('mini-player');
+    player.classList.toggle('has-headphones', connected);
+    document.getElementById('mini-output-name').textContent = name;
+    document.getElementById('mini-output-symbol').textContent = kind === 'bluetooth' ? 'bluetooth' : 'headphones';
+    const button = document.getElementById('mini-output');
+    button.disabled = !canSwitch;
+    button.setAttribute('aria-label', (connected ? name : '이 기기') + (canSwitch ? ' · 오디오 출력 변경' : '에서 재생'));
+    button.firstElementChild.textContent = connected ? 'headphones' : 'devices';
+    this.safeApplyMarquee();
+  }
+
   updateMiniPlayerColor(artwork = '') {
     const playerStyle = document.documentElement.style;
     const artworkKey = artwork || '';
@@ -1741,46 +1759,70 @@ class App {
     const requestId = (this._miniPlayerColorRequest || 0) + 1;
     this._miniPlayerColorRequest = requestId;
     playerStyle.removeProperty('--playing-artwork-color');
+    playerStyle.removeProperty('--mini-cover-color');
     if (!artworkKey) return;
 
-    const nativeBridge = window.AuraSoundNative;
-    if (nativeBridge && typeof nativeBridge.getArtworkPaletteColor === 'function') {
-      try {
-        nativeBridge.getArtworkPaletteColor(artworkKey, String(requestId));
-        return;
-      } catch (_) {}
-    }
-
+    const fallback = () => {
+      if (this._miniPlayerColorRequest === requestId && /^data:image\/[^,]*;base64,/i.test(artworkKey)) {
+        window.AuraSoundNative?.getArtworkPaletteColor?.(artworkKey, String(requestId));
+      }
+    };
     const image = new Image();
     image.decoding = 'async';
     image.onload = () => {
       if (this._miniPlayerColorRequest !== requestId) return;
       const color = this.sampleArtworkColor(image);
-      if (color) playerStyle.setProperty('--playing-artwork-color', color);
+      if (color) this.setMiniPlayerPaletteColor(requestId, color);
+      else fallback();
     };
+    image.onerror = fallback;
     image.src = artworkKey;
   }
 
   sampleArtworkColor(image) {
     try {
       const canvas = document.createElement('canvas');
-      canvas.width = canvas.height = 12;
+      canvas.width = canvas.height = 112;
       const context = canvas.getContext('2d', { willReadFrequently: true });
       if (!context) return null;
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      let red = 0, green = 0, blue = 0, weight = 0;
+      const colors = new Map();
+      let dominant = null;
       for (let index = 0; index < pixels.length; index += 4) {
         const alpha = pixels[index + 3] / 255;
         if (alpha < .08) continue;
-        red += pixels[index] * alpha;
-        green += pixels[index + 1] * alpha;
-        blue += pixels[index + 2] * alpha;
-        weight += alpha;
+        const red = pixels[index], green = pixels[index + 1], blue = pixels[index + 2];
+        const key = ((red >> 5) * 8 + (green >> 5)) * 8 + (blue >> 5);
+        let group = colors.get(key);
+        if (!group) {
+          group = { red: 0, green: 0, blue: 0, weight: 0 };
+          colors.set(key, group);
+        }
+        group.red += red * alpha;
+        group.green += green * alpha;
+        group.blue += blue * alpha;
+        group.weight += alpha;
+        if (!dominant || group.weight > dominant.weight) dominant = group;
       }
-      if (!weight) return null;
-      const shade = value => Math.round(Math.min(255, value / weight * .78));
-      return `rgb(${shade(red)}, ${shade(green)}, ${shade(blue)})`;
+      if (!dominant) return null;
+      let selected = dominant;
+      let best = 0;
+      for (const group of colors.values()) {
+        const channels = [group.red, group.green, group.blue].map(sum => sum / group.weight);
+        const peak = Math.max(...channels);
+        const chroma = peak - Math.min(...channels);
+        if (chroma < 20 || group.weight < pixels.length / 4 * .008) continue;
+        const midtone = Math.min(1, peak / 80, (255 - peak) / 65);
+        const score = chroma * Math.sqrt(group.weight) * midtone;
+        if (score > best) {
+          best = score;
+          selected = group;
+        }
+      }
+      return '#' + ['red', 'green', 'blue'].map(channel =>
+        Math.round(selected[channel] / selected.weight).toString(16).padStart(2, '0')
+      ).join('');
     } catch (_) {
       return null;
     }
@@ -1788,7 +1830,18 @@ class App {
 
   setMiniPlayerPaletteColor(requestId, color) {
     if (Number(requestId) !== this._miniPlayerColorRequest || !/^#[\da-f]{6}$/i.test(color || '')) return;
-    document.documentElement.style.setProperty('--playing-artwork-color', color);
+    const style = document.documentElement.style;
+    style.setProperty('--playing-artwork-color', color);
+    const rgb = color.slice(1).match(/../g).map(pair => parseInt(pair, 16));
+    const peak = Math.max(...rgb);
+    const saturation = peak ? 1 - Math.min(...rgb) / peak : 0;
+    // Keep muted artwork muted. Increase the contrast of stronger accent colors gradually.
+    const intensity = Math.max(0, Math.min(1, (saturation - .42) / .12));
+    const gain = Math.min(1 / (saturation || 1), 1 + .16 * intensity);
+    const ceiling = 84 - 9 * intensity;
+    const scale = ceiling / Math.max(ceiling, peak);
+    const background = rgb.map(value => Math.round((peak - (peak - value) * gain) * scale));
+    style.setProperty('--mini-cover-color', 'rgb(' + background.join(',') + ')');
   }
 
   initCoverIconSizing() {
@@ -2614,23 +2667,10 @@ class App {
   }
 
   applyViewModeUI() {
-    document
-      .getElementById(
-        'btn-view-list'
-      )
-      .classList.toggle(
-        'active',
-        this.state.activeViewMode === 'list'
-      );
-
-    document
-      .getElementById(
-        'btn-view-grid'
-      )
-      .classList.toggle(
-        'active',
-        this.state.activeViewMode === 'grid'
-      );
+    const toggle = document.getElementById('btn-library-layout');
+    const grid = this.state.activeViewMode === 'grid';
+    toggle.setAttribute('aria-label', grid ? '목록 보기' : '그리드 보기');
+    toggle.firstElementChild.textContent = grid ? 'view_list' : 'grid_view';
   }
 
   handleFileImport(e) {
@@ -3253,7 +3293,7 @@ class App {
   openProfileDrawer() {
     const overlay = document.getElementById('profile-drawer-overlay');
     if (!overlay) return;
-    document.getElementById('app')?.classList.add('profile-drawer-open');
+    document.getElementById('playback-shell')?.classList.add('profile-drawer-open');
     overlay.classList.add('active');
     this.sendNativeMessage('overlay', { open: true, type: 'profile-drawer' });
   }
@@ -3262,7 +3302,7 @@ class App {
     const overlay = document.getElementById('profile-drawer-overlay');
     if (!overlay?.classList.contains('active')) return;
     const drawer = overlay.querySelector('.profile-drawer');
-    const appShell = document.getElementById('app');
+    const appShell = document.getElementById('playback-shell');
     if (dragged && drawer && appShell) {
       drawer.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1)';
       drawer.style.transform = `translate3d(-${drawer.clientWidth}px,0,0)`;
@@ -3286,7 +3326,7 @@ class App {
   bindProfileDrawerGestures() {
     const overlay = document.getElementById('profile-drawer-overlay');
     const drawer = overlay?.querySelector('.profile-drawer');
-    const appShell = document.getElementById('app');
+    const appShell = document.getElementById('playback-shell');
     if (!overlay || !drawer || !appShell) return;
 
     const bindDismissSwipe = (target, canStart) => {
@@ -3388,7 +3428,8 @@ class App {
     const activeView = document.querySelector('.view.active');
     const search = this._collectionDetail?.searchAboveCover;
     const searchHasQuery = search?.querySelector('input').value.trim();
-    if (content) content.scrollTop = search && !searchHasQuery ? search.offsetHeight : 0;
+    const showSearch = search && getComputedStyle(search).getPropertyValue('--show-playlist-search').trim() === '1';
+    if (content) content.scrollTop = search && !showSearch && !searchHasQuery ? search.offsetHeight : 0;
     if (activeView) activeView.scrollTop = 0;
     this.updateCollectionDetailScroll();
   }
@@ -3402,8 +3443,7 @@ class App {
     const navigation = view.querySelector('.detail-navigation');
     navigation.querySelector('.detail-navigation-title').textContent = view.querySelector('h2').textContent;
     const search = view.querySelector('.detail-search-panel');
-    const hasQuery = Boolean(search.querySelector('input').value.trim());
-    search.querySelector('button').classList.toggle('hidden', !hasQuery);
+    if (search) search.querySelector('button').classList.toggle('hidden', !search.querySelector('input').value.trim());
     const artwork = view.querySelector('.playlist-cover-large, .detail-artist-banner');
     const detail = {
       view, navigation, artwork,
@@ -3454,7 +3494,7 @@ class App {
       view.style.setProperty('--detail-cover-progress', String(fade));
     }
     if (destination) {
-      view.style.setProperty('--detail-play-x', `${(origin.right - destination.right) * (1 - collapse)}px`);
+      view.style.setProperty('--detail-play-x', `${origin.right - destination.right}px`);
       view.style.setProperty('--detail-play-y', `${destinationY - destination.top - destination.height / 2 + Math.max(0, remainingY)}px`);
       more.inert = collapse >= .98;
       view.classList.add('detail-positioned');
@@ -3491,16 +3531,18 @@ class App {
 
   openFullPlayer() {
     const full = document.getElementById('full-player');
-    if (!full) return;
+    if (!full || full.classList.contains('active')) return;
 
     full.scrollTop = 0;
     full.classList.remove('closing', 'is-dismissing', 'is-dragging');
     full.style.transition = 'none';
-    full.style.transform = 'translate3d(0, 100%, 0)';
+    full.style.transform = window.matchMedia(SPLIT_PLAYER_QUERY).matches ? '' : 'translate3d(0, 100%, 0)';
     full.style.opacity = '1';
     void full.offsetHeight;
     full.classList.add('active', 'is-opening');
+    this.setPlayerExpanded(false);
     full.style.transform = '';
+    full.style.transition = '';
 
     window.setTimeout(() => {
       full.classList.remove('is-opening');
@@ -3510,18 +3552,41 @@ class App {
     this.safeApplyMarquee();
   }
 
+  setPlayerExpanded(expanded) {
+    const full = document.getElementById('full-player');
+    full.classList.toggle('player-expanded', expanded);
+    const modalPlayer = full.classList.contains('active')
+      && (expanded || !window.matchMedia(SPLIT_PLAYER_QUERY).matches);
+    document.getElementById('app').inert = modalPlayer;
+    document.querySelector('.bottom-nav').inert = modalPlayer;
+    document.getElementById('mini-player').inert = full.classList.contains('active');
+    const button = document.getElementById('btn-expand-player');
+    button.setAttribute('aria-pressed', String(expanded));
+    button.setAttribute('aria-label', expanded ? '오른쪽 플레이어로 접기' : '전체 화면으로 펼치기');
+    full.scrollTop = 0;
+    this.safeApplyMarquee();
+  }
+
   closeFullPlayer() {
     const full = document.getElementById('full-player');
     if (!full || !full.classList.contains('active') || full.classList.contains('is-dismissing')) return;
 
     full.classList.remove('is-opening', 'is-dragging');
     full.classList.add('is-dismissing');
-    full.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1), opacity .24s ease';
-    full.style.transform = 'translate3d(0, 100%, 0)';
-    full.style.opacity = '0';
+    const closeToDock = window.matchMedia(SPLIT_PLAYER_QUERY).matches
+      && !full.classList.contains('player-expanded') && !full.style.transform;
+    if (closeToDock) {
+      full.style.clipPath = 'var(--minimized-player-clip)';
+    } else {
+      full.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1), opacity .24s ease';
+      full.style.transform = 'translate3d(0, 100%, 0)';
+      full.style.opacity = '0';
+    }
 
     window.setTimeout(() => {
       full.classList.remove('active', 'is-dismissing');
+      full.style.clipPath = '';
+      this.setPlayerExpanded(false);
       full.style.transition = 'none';
       full.style.transform = 'translate3d(0, 100%, 0)';
       full.style.opacity = '0';
@@ -3531,6 +3596,7 @@ class App {
         full.style.transform = 'translate3d(0, 100%, 0)';
         full.style.opacity = '1';
         full.style.transition = '';
+        this.safeApplyMarquee();
       });
     }, 290);
   }
@@ -3552,9 +3618,10 @@ class App {
           const createSheet = el.querySelector('.bottom-sheet');
           const isOpening = isActive && !createSheet?.classList.contains('is-dismissing');
           createButton?.classList.toggle('is-open', isOpening);
+          createButton?.setAttribute('aria-expanded', String(isOpening));
           createButton?.setAttribute('aria-label', isOpening ? '만들기 메뉴 닫기' : '만들기 메뉴 열기');
         }
-        if (isActive) {
+        if (isActive && !this.overlayStack.includes(id)) {
           el.scrollTop = 0;
           el.querySelectorAll('.bottom-sheet, .sheet-menu-list, .create-sheet-options, .modal-dialog, .modal-body-scroll, .queue-list')
             .forEach(scrollable => { scrollable.scrollTop = 0; });
@@ -3791,6 +3858,11 @@ class App {
     this.switchView(previousView);
   }
 
+  backFromSettings() {
+    const returnView = this.state.previousView;
+    this.switchView(returnView && returnView !== 'settings' ? returnView : (this.state.activeTab || 'home'));
+  }
+
   handleBackNavigation() {
     const modal = document.getElementById('modal-overlay');
     if (modal?.classList.contains('active')) {
@@ -3805,7 +3877,17 @@ class App {
     );
 
     const lastOverlayId = this.overlayStack[this.overlayStack.length - 1];
+    const splitPlayer = lastOverlayId === 'full-player' && window.matchMedia(SPLIT_PLAYER_QUERY).matches
+      && !document.getElementById('full-player').classList.contains('player-expanded');
+    if (this.state.activeView === 'settings' && (!lastOverlayId || splitPlayer)) {
+      this.backFromSettings();
+      return true;
+    }
     if (lastOverlayId) {
+      if (lastOverlayId === 'full-player' && document.getElementById('full-player').classList.contains('player-expanded')) {
+        this.setPlayerExpanded(false);
+        return true;
+      }
       this.scrollMainContentToTop();
       if (lastOverlayId === 'full-player') {
         this.closeFullPlayer();
@@ -3814,12 +3896,6 @@ class App {
       } else {
         this.closeOverlayWithAnimation(lastOverlayId);
       }
-      return true;
-    }
-
-    if (this.state.activeView === 'settings') {
-      const returnView = this.state.previousView;
-      this.switchView(returnView && returnView !== 'settings' ? returnView : (this.state.activeTab || 'home'));
       return true;
     }
 
@@ -4025,7 +4101,7 @@ class App {
       return card;
     };
 
-    quickItems.slice(0, 12).forEach(entry => quickGrid.appendChild(createEntityCard(entry, true)));
+    quickItems.slice(0, 6).forEach(entry => quickGrid.appendChild(createEntityCard(entry, true)));
     this.updateHomeNowPlayingIndicators();
 
     const recent = document.getElementById('home-recently-played');
@@ -4139,6 +4215,8 @@ class App {
       matchedPlaylists.forEach(playlist => {
         const row = this.createCollectionRow({
           title: playlist.name,
+          contextType: 'playlist',
+          contextId: playlist.id,
           coverData: playlist.coverData || '',
           fallbackIcon: 'queue_music',
           secondaryText: this.getCollectionSubtitle('playlist', playlist),
@@ -4167,6 +4245,8 @@ class App {
         items.forEach(album => {
           const row = this.createCollectionRow({
             title: album.name,
+            contextType: 'album',
+            contextId: album.id,
             coverData: album.coverData,
             fallbackIcon: 'album',
             artworkClass: 'album-list-art',
@@ -4297,6 +4377,8 @@ class App {
           const artistCover = artistCovers[group.name] || '';
           const row = this.createCollectionRow({
             title: group.name,
+            contextType: 'artist',
+            contextId: `artist:${group.name}`,
             coverData: artistCover,
             fallbackIcon: 'person',
             artworkClass: 'artist-list-art artist-artwork',
@@ -4510,8 +4592,6 @@ class App {
     this.state.albumDetailId = albumId;
     const albumMoreButton = document.getElementById('btn-album-more');
     if (albumMoreButton) albumMoreButton.onclick = () => this.openAlbumMenu(albumId);
-    this.state.albumSearchQuery = '';
-    document.getElementById('album-search-input').value = '';
     document.getElementById('album-detail-title').textContent = album.name;
     document.getElementById('album-detail-artist').textContent = album.artist || '알 수 없는 아티스트';
     this.setCoverElement(document.getElementById('album-detail-cover'), album.coverData || '', 'album');
@@ -4542,10 +4622,7 @@ class App {
   getVisibleAlbumTracks(albumId) {
     const album = this.getAlbumGroups().find(item => item.id === albumId);
     if (!album) return [];
-    let tracks = [...album.tracks];
-    const q = (this.state.albumSearchQuery || '').trim().toLowerCase();
-    if (q) tracks = tracks.filter(track => (track.title || '').toLowerCase().includes(q));
-    return tracks;
+    return [...album.tracks];
   }
 
   renderAlbumTracks(albumId) {
@@ -4558,6 +4635,7 @@ class App {
     container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>검색 결과가 없습니다.</p></div>';
     tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'album', id: albumId, name: album?.name || track.album || '' })));
     if (album) {
+      this.setCoverElement(document.getElementById('album-artist-avatar'), this.getStoredLocalObject('auraArtistCovers')[album.artist], 'person');
       document.getElementById('album-detail-title').textContent = album.name;
       document.getElementById('album-detail-artist').textContent = album.artist || '알 수 없는 아티스트';
     }
@@ -4647,6 +4725,8 @@ class App {
 
   createCollectionRow({
     title,
+    contextType,
+    contextId,
     coverData = '',
     fallbackIcon = 'music_note',
     artworkClass = '',
@@ -4658,6 +4738,11 @@ class App {
   }) {
     const row = document.createElement('div');
     row.className = 'track-row clickable collection-row';
+    if (contextType) {
+      row.dataset.contextType = contextType;
+      row.dataset.contextId = contextId;
+      row.classList.toggle('playing', this.isCurrentCollection(contextType, contextId));
+    }
 
     const artworkClasses = ['track-artwork'];
     if (artworkClass) artworkClasses.push(artworkClass);
@@ -6054,10 +6139,8 @@ class App {
     this.state.artistDetailId = artistName;
     document.getElementById('artist-detail-title').textContent = artistName;
 
-    this.state.artistSearchQuery = '';
     this.state.artistSortMode = 'default';
 
-    document.getElementById('artist-search-input').value = '';
     this.renderArtistTracks(artistName);
 
     const artistCovers = this.getStoredLocalObject('auraArtistCovers');
@@ -6094,8 +6177,6 @@ class App {
 
   getVisibleArtistTracks(artistName) {
     let tracks = this.getArtistTracksOrdered(artistName);
-    const q = (this.state.artistSearchQuery || '').trim().toLowerCase();
-    if (q) tracks = tracks.filter(track => (track.title || '').toLowerCase().includes(q));
     if (this.state.artistSortMode === 'title_asc') {
       tracks.sort((a, b) => a.title.localeCompare(b.title, 'ko', { sensitivity: 'base' }));
     } else if (this.state.artistSortMode === 'addedAt_desc') {
@@ -6554,6 +6635,7 @@ class App {
                   .classList.add(
                     'hidden'
                   );
+                this.closeFullPlayer();
               }
             }
 
@@ -6624,6 +6706,7 @@ class App {
       )
       .textContent =
       track.artist;
+    document.getElementById('mini-inline-artist').textContent = track.artist;
 
     document
       .getElementById(
@@ -6883,33 +6966,30 @@ class App {
             '.track-title-viewport, .track-artist-viewport, .quick-title-viewport'
           );
 
-        const miniViewports = [
-          document.querySelector('.mini-title')?.parentElement,
-          document.querySelector('.mini-artist')?.parentElement
-        ].filter(Boolean);
-
-        miniViewports.forEach(viewport => {
-          viewport.classList.add('mini-marquee-viewport');
-        });
-
         const measurements = [];
-        for (const viewport of new Set([...viewports, ...miniViewports])) {
+        for (const viewport of viewports) {
           const content = viewport.querySelector('.marquee-content');
           const width = viewport.clientWidth;
-          if (content && width) measurements.push({ content, distance: content.scrollWidth - width });
+          if (content && width) measurements.push({ content, width, textWidth: content.offsetWidth });
         }
 
-        for (const { content, distance } of measurements) {
-          if (distance > 2) {
-            const scrollDistance = `-${distance}px`;
+        for (const { content, width, textWidth } of measurements) {
+          if (textWidth > width + 2) {
+            const period = textWidth + 32;
+            const scrollDistance = `-${period}px`;
             if (content.style.getPropertyValue('--scroll-dist') !== scrollDistance) {
               content.style.setProperty('--scroll-dist', scrollDistance);
+              content.style.setProperty('--marquee-duration', `${period / 30}s`);
             }
+            // The mini player has separate title, separator and artist styles.
+            const parts = content.children.length ? content.children : [content];
+            for (const part of parts) part.dataset.marqueeText = part.textContent.trim();
             content.style.removeProperty('transform');
             content.classList.add('marquee-anim');
           } else {
             content.classList.remove('marquee-anim');
             content.style.removeProperty('--scroll-dist');
+            content.style.removeProperty('--marquee-duration');
             if (content.style.transform !== 'translateX(0)') content.style.transform = 'translateX(0)';
           }
         }
@@ -6926,20 +7006,17 @@ class App {
         '.track-row'
       )
       .forEach(row => {
-        if (
-          current &&
-          row.dataset.id ===
-            current.id
-        ) {
-          row.classList.add(
-            'playing'
-          );
-        } else {
-          row.classList.remove(
-            'playing'
-          );
-        }
+        const active = row.dataset.contextType
+          ? this.isCurrentCollection(row.dataset.contextType, row.dataset.contextId)
+          : Boolean(current && row.dataset.id === current.id);
+        row.classList.toggle('playing', active);
       });
+  }
+
+  isCurrentCollection(type, id) {
+    const context = this.state.playbackContext;
+    return Boolean(this.state.currentTrackId && id != null && context?.type === type
+      && String(context.id) === String(id));
   }
 
   updatePlaylistPlayButton() {
@@ -6952,11 +7029,7 @@ class App {
     activeContexts.forEach(([buttonId, type, id]) => {
       const button = document.getElementById(buttonId);
       if (!button) return;
-      const isCurrentCollection = this.state.currentTrackId
-        && id != null
-        && this.state.playbackContext?.type === type
-        && String(this.state.playbackContext.id) === String(id);
-      const isPlaying = Boolean(isCurrentCollection && this.state.isPlaying);
+      const isPlaying = this.isCurrentCollection(type, id) && this.state.isPlaying;
       const icon = button.querySelector('.material-symbols-rounded');
       if (icon) icon.textContent = isPlaying ? 'pause' : 'play_arrow';
       button.setAttribute('aria-label', isPlaying ? '일시정지' : '전체 재생');

@@ -74,12 +74,17 @@ public final class AuraSoundPlaybackService extends MediaSessionService {
             @Override
             public void onMediaItemTransition(MediaItem mediaItem, int i) {
                 AuraSoundPlaybackService.this.persistPlaybackState();
-                AuraSoundPlaybackService.this.sendPlaybackState();
                 if (mediaItem != null) {
                     if (i == 1 || i == 2) {
                         MainActivity.sendMediaAction("nativeTransition", mediaItem.mediaId);
                     }
                 }
+                AuraSoundPlaybackService.this.sendPlaybackState();
+            }
+
+            @Override
+            public void onTimelineChanged(androidx.media3.common.Timeline timeline, int reason) {
+                AuraSoundPlaybackService.this.sendPlaybackState();
             }
 
             @Override
