@@ -35,7 +35,8 @@ import androidx.media3.session.SessionToken;
 import androidx.palette.graphics.Palette;
 import com.getcapacitor.BridgeActivity;
 import com.google.common.util.concurrent.ListenableFuture;
-import java.io.ByteArrayOutputStream;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -52,10 +53,13 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -69,10 +73,12 @@ public class MainActivity extends BridgeActivity {
     private static volatile boolean overlayOpen = false;
     private static WeakReference<WebView> webViewRef;
     private File currentImportFile;
+    private File currentImportTemp;
     private FileOutputStream currentImportStream;
     private MediaController mediaController;
     private ListenableFuture<MediaController> mediaControllerFuture;
     private File musicDirectory;
+    private LibraryCatalog libraryCatalog;
     private String pendingBackupJson;
     private final ArrayDeque<Consumer<MediaController>> pendingPlayerCommands = new ArrayDeque<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -131,13 +137,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    public void onCreate(Bundle bundle) {
-        super.onCreate(bundle);
-        WebView webView = getBridge().getWebView();
-        applyStatusBarAppearance();
-        webViewRef = new WeakReference<>(webView);
-        webView.addJavascriptInterface(new AuraSoundBridge(), "AuraSoundNative");
-        getOnBackPressedDispatcher().addCallback(this, new BackPressCallback(true));
+    protected void load() {
         File externalFilesDir = getExternalFilesDir(Environment.DIRECTORY_MUSIC);
         if (externalFilesDir == null) {
             externalFilesDir = getFilesDir();
@@ -147,6 +147,20 @@ public class MainActivity extends BridgeActivity {
         if (!file.exists()) {
             this.musicDirectory.mkdirs();
         }
+        WebView webView = findViewById(com.getcapacitor.android.R.id.webview);
+        webView.addJavascriptInterface(new AuraSoundBridge(), "AuraSoundNative");
+        libraryCatalog = new LibraryCatalog(this);
+        webView.addJavascriptInterface(libraryCatalog, "AuraSoundLibrary");
+        super.load();
+    }
+
+    @Override
+    public void onCreate(Bundle bundle) {
+        super.onCreate(bundle);
+        WebView webView = getBridge().getWebView();
+        applyStatusBarAppearance();
+        webViewRef = new WeakReference<>(webView);
+        getOnBackPressedDispatcher().addCallback(this, new BackPressCallback(true));
         if (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") == 0) {
             return;
         }
@@ -506,6 +520,7 @@ public class MainActivity extends BridgeActivity {
         releaseMediaController();
         webViewRef = null;
         super.onDestroy();
+        if (libraryCatalog != null) libraryCatalog.close();
     }
 
     public static void sendPlaybackState(boolean z, long j, long j2, float f, String str) {
@@ -563,7 +578,7 @@ public class MainActivity extends BridgeActivity {
             return null;
         }
         String strSubstring = str.substring("Music/".length());
-        if (strSubstring.contains("/") || strSubstring.contains("\\") || strSubstring.contains("..")) {
+        if (strSubstring.isEmpty() || strSubstring.contains("/") || strSubstring.contains("\\") || strSubstring.equals(".") || strSubstring.equals("..")) {
             return null;
         }
         return new File(this.musicDirectory, strSubstring);
@@ -603,22 +618,27 @@ public class MainActivity extends BridgeActivity {
         return null;
     }
 
-    public String beginImport(String str, String str2) throws IOException {
-        cancelImport();
-        String str3 = ((str == null || str.trim().isEmpty()) ? "track" : sanitizeFileName(str)) + "_" + sanitizeFileName(str2);
-        File file = new File(this.musicDirectory, str3);
-        int iLastIndexOf = str3.lastIndexOf(46);
-        String strSubstring = iLastIndexOf > 0 ? str3.substring(0, iLastIndexOf) : str3;
-        String strSubstring2 = iLastIndexOf > 0 ? str3.substring(iLastIndexOf) : "";
-        int i = 1;
-        while (file.exists()) {
-            str3 = strSubstring + "_" + i + strSubstring2;
-            i++;
-            file = new File(this.musicDirectory, str3);
+    private JSONArray storedMusicNames() throws IOException {
+        File[] files = musicDirectory.listFiles();
+        if (files == null || (getExternalFilesDir(Environment.DIRECTORY_MUSIC) == null && files.length == 0)) {
+            throw new IOException("음악 폴더를 읽을 수 없습니다. 저장소를 확인한 후 다시 열어 주세요.");
         }
+        java.util.Arrays.sort(files);
+        JSONArray names = new JSONArray();
+        for (File file : files) {
+            if (file.isFile() && !file.isHidden() && file.length() > 0) names.put(file.getName());
+        }
+        return names;
+    }
+
+    public String beginImport(String trackId, String fileName) throws IOException {
+        cancelImport();
+        String id = trackId == null || trackId.trim().isEmpty() ? "track" : sanitizeFileName(trackId);
+        File file = new File(musicDirectory, uniqueMusicName(id + "_" + sanitizeFileName(fileName)));
         this.currentImportFile = file;
-        this.currentImportStream = new FileOutputStream(file, false);
-        return "Music/" + str3;
+        this.currentImportTemp = File.createTempFile(".aura-import-", ".part", this.musicDirectory);
+        this.currentImportStream = new FileOutputStream(this.currentImportTemp, false);
+        return "Music/" + file.getName();
     }
 
     public void appendImport(String str) throws IOException {
@@ -630,12 +650,14 @@ public class MainActivity extends BridgeActivity {
 
     public void finishImport() throws IOException {
         FileOutputStream fileOutputStream = this.currentImportStream;
-        if (fileOutputStream != null) {
-            fileOutputStream.flush();
-            this.currentImportStream.close();
-        }
+        if (fileOutputStream == null) throw new IOException("No active import");
+        fileOutputStream.close();
         this.currentImportStream = null;
+        if (!this.currentImportTemp.renameTo(this.currentImportFile)) {
+            throw new IOException("음악 파일을 저장하지 못했습니다.");
+        }
         this.currentImportFile = null;
+        this.currentImportTemp = null;
     }
 
     public void cancelImport() {
@@ -647,11 +669,12 @@ public class MainActivity extends BridgeActivity {
         } catch (IOException unused) {
         }
         this.currentImportStream = null;
-        File file = this.currentImportFile;
+        File file = this.currentImportTemp;
         if (file != null && file.exists()) {
-            this.currentImportFile.delete();
+            file.delete();
         }
         this.currentImportFile = null;
+        this.currentImportTemp = null;
     }
 
     public boolean deleteMusicFile(String str) {
@@ -746,118 +769,72 @@ public class MainActivity extends BridgeActivity {
         startActivityForResult(intent, REQUEST_IMPORT_BACKUP);
     }
 
-    private void writeTextEntry(ZipOutputStream zipOutputStream, String str, String str2) throws IOException {
-        zipOutputStream.putNextEntry(new ZipEntry(str));
-        zipOutputStream.write(str2.getBytes(StandardCharsets.UTF_8));
-        zipOutputStream.closeEntry();
-    }
-
     private void exportBackup(Uri uri, String backupJson) throws Exception {
         if (backupJson == null) {
             throw new IOException("백업 데이터가 없습니다.");
         }
-        JSONObject jSONObject = new JSONObject(backupJson);
-        JSONArray jSONArrayOptJSONArray = jSONObject.optJSONArray("tracks");
-        if (jSONArrayOptJSONArray == null) {
-            jSONArrayOptJSONArray = new JSONArray();
+        JSONObject metadata = BackupMetadata.withDefaults(new JSONObject(backupJson));
+        JSONArray tracks = metadata.getJSONArray("tracks");
+        if (tracks.length() == 0 && storedMusicNames().length() > 0) {
+            throw new IOException("음악 폴더에 파일이 남아 있어 빈 백업을 저장할 수 없습니다.");
         }
-        OutputStream outputStreamOpenOutputStream = getContentResolver().openOutputStream(uri);
-        if (outputStreamOpenOutputStream == null) {
+
+        Map<JSONObject, File> audioSources = new LinkedHashMap<>();
+        for (int i = 0; i < tracks.length(); i++) {
+            JSONObject track = tracks.optJSONObject(i);
+            if (track == null) continue;
+            File audioFile = findBackupSource(track);
+            if (audioFile == null || audioFile.length() == 0) {
+                throw new IOException("음악 파일을 찾을 수 없습니다: " + track.optString("fileName", track.optString("filePath", "")));
+            }
+            String entryName = sanitizeBackupEntryName(track.optString(
+                    "backupFile", "track-" + i + "-" + sanitizeBackupEntryName(audioFile.getName())));
+            track.put("backupFile", entryName);
+            audioSources.put(track, audioFile);
+        }
+        Map<String, File> audioEntries = BackupAudio.uniqueEntries(audioSources);
+        int formatVersion = audioEntries.size() < audioSources.size() ? 2 : 1;
+
+        OutputStream destination = getContentResolver().openOutputStream(uri);
+        if (destination == null) {
             throw new IOException("백업 파일을 만들 수 없습니다.");
         }
-        try {
-            try {
-                ZipOutputStream zipOutputStream = new ZipOutputStream(outputStreamOpenOutputStream);
-                try {
-                    writeTextEntry(zipOutputStream, "manifest.json", new JSONObject().put("format", "AuraSoundBackup").put("version", 1).put("appVersion", "1.0.2").toString());
-                    writeTextEntry(zipOutputStream, "tracks.json", jSONArrayOptJSONArray.toString());
-                    String string = "[]";
-                    writeTextEntry(zipOutputStream, "playlists.json", jSONObject.optJSONArray("playlists") == null ? "[]" : jSONObject.optJSONArray("playlists").toString());
-                    if (jSONObject.optJSONArray("appState") != null) {
-                        string = jSONObject.optJSONArray("appState").toString();
-                    }
-                    writeTextEntry(zipOutputStream, "appState.json", string);
-                    writeTextEntry(zipOutputStream, "artistCovers.json", jSONObject.optJSONObject("artistCovers") == null ? "{}" : jSONObject.optJSONObject("artistCovers").toString());
-                    byte[] bArr = new byte[65536];
-                    for (int i = 0; i < jSONArrayOptJSONArray.length(); i++) {
-                        JSONObject jSONObjectOptJSONObject = jSONArrayOptJSONArray.optJSONObject(i);
-                        if (jSONObjectOptJSONObject != null) {
-                            String strOptString = jSONObjectOptJSONObject.optString("filePath", "");
-                            File fileFindBackupSource = findBackupSource(jSONObjectOptJSONObject);
-                            if (fileFindBackupSource == null) {
-                                throw new IOException("음악 파일을 찾을 수 없습니다: " + jSONObjectOptJSONObject.optString("fileName", strOptString));
-                            }
-                            zipOutputStream.putNextEntry(new ZipEntry("music/" + sanitizeBackupEntryName(jSONObjectOptJSONObject.optString("backupFile", "track-" + i + "-" + sanitizeBackupEntryName(fileFindBackupSource.getName())))));
-                            FileInputStream fileInputStream = new FileInputStream(fileFindBackupSource);
-                            while (true) {
-                                try {
-                                    int i2 = fileInputStream.read(bArr);
-                                    if (i2 == -1) {
-                                        break;
-                                    } else {
-                                        zipOutputStream.write(bArr, 0, i2);
-                                    }
-                                } catch (Throwable th) {
-                                    try {
-                                        fileInputStream.close();
-                                    } catch (Throwable th2) {
-                                        th.addSuppressed(th2);
-                                    }
-                                    throw th;
-                                }
-                            }
-                            fileInputStream.close();
-                            zipOutputStream.closeEntry();
-                        }
-                    }
-                    zipOutputStream.finish();
-                    zipOutputStream.close();
-                    if (outputStreamOpenOutputStream != null) {
-                        outputStreamOpenOutputStream.close();
-                    }
-                    this.pendingBackupJson = null;
-                } catch (Throwable th5) {
-                    zipOutputStream.close();
-                    throw th5;
+        try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(destination, 65536))) {
+            zip.setLevel(Deflater.BEST_COMPRESSION);
+            BackupMetadata.write(zip, metadata, "1.0.3", formatVersion);
+            byte[] buffer = new byte[65536];
+            for (Map.Entry<String, File> entry : audioEntries.entrySet()) {
+                zip.putNextEntry(new ZipEntry("music/" + entry.getKey()));
+                try (FileInputStream input = new FileInputStream(entry.getValue())) {
+                    BackupAudio.copy(input, zip, buffer);
                 }
-            } catch (Throwable th6) {
-                if (outputStreamOpenOutputStream != null) {
-                    outputStreamOpenOutputStream.close();
-                }
-                throw th6;
+                zip.closeEntry();
             }
-        } catch (Throwable th7) {
-            this.pendingBackupJson = null;
-            throw th7;
         }
     }
 
-    private String readZipText(ZipInputStream zipInputStream, ZipEntry zipEntry) throws IOException {
-        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        byte[] bArr = new byte[16384];
-        do {
-            int i = zipInputStream.read(bArr);
-            if (i != -1) {
-                byteArrayOutputStream.write(bArr, 0, i);
-            } else {
-                return byteArrayOutputStream.toString(StandardCharsets.UTF_8.name());
-            }
-        } while (byteArrayOutputStream.size() <= 16777216);
-        throw new IOException("백업 메타데이터가 너무 큽니다.");
-    }
+    private String uniqueMusicName(String fileName) {
+        String sanitized = sanitizeFileName(fileName);
+        int dot = sanitized.lastIndexOf('.');
+        String extension = dot > 0 && sanitized.length() - dot <= 16 ? sanitized.substring(dot) : "";
+        String stem = sanitized.substring(0, sanitized.length() - extension.length());
 
-    private String uniqueMusicName(String str) {
-        String strSanitizeFileName = sanitizeFileName(str);
-        File file = new File(this.musicDirectory, strSanitizeFileName);
-        int iLastIndexOf = strSanitizeFileName.lastIndexOf(46);
-        String strSubstring = iLastIndexOf > 0 ? strSanitizeFileName.substring(0, iLastIndexOf) : strSanitizeFileName;
-        String strSubstring2 = iLastIndexOf > 0 ? strSanitizeFileName.substring(iLastIndexOf) : "";
-        int i = 1;
-        while (file.exists()) {
-            file = new File(this.musicDirectory, strSubstring + "_" + i + strSubstring2);
-            i++;
+        for (int index = 0; ; index++) {
+            String ending = (index == 0 ? "" : "_" + index) + extension;
+            // Keep long UTF-8 names within the filesystem limit without cutting the extension or a character.
+            int available = 255 - ending.getBytes(StandardCharsets.UTF_8).length;
+            int bytes = 0;
+            int end = 0;
+            while (end < stem.length()) {
+                int codePoint = stem.codePointAt(end);
+                int width = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+                if (bytes + width > available) break;
+                bytes += width;
+                end += Character.charCount(codePoint);
+            }
+            String candidate = stem.substring(0, end) + ending;
+            if (!new File(musicDirectory, candidate).exists()) return candidate;
         }
-        return file.getName();
     }
 
     private void deleteDirectory(File file) {
@@ -972,10 +949,16 @@ public class MainActivity extends BridgeActivity {
             throw new IOException("임시 백업 폴더를 만들 수 없습니다.");
         }
 
-        String tracksJson = "[]";
-        String playlistsJson = "[]";
-        String appStateJson = "[]";
-        String artistCoversJson = "{}";
+        try {
+            return restoreBackup(uri, totalBytes, temporaryDirectory);
+        } finally {
+            deleteDirectory(temporaryDirectory);
+        }
+    }
+
+    private String restoreBackup(Uri uri, long totalBytes, File temporaryDirectory) throws Exception {
+        JSONObject metadata = BackupMetadata.withDefaults(new JSONObject());
+        Map<String, File> extractedAudio = new HashMap<>();
 
         InputStream sourceStream = getContentResolver().openInputStream(uri);
         if (sourceStream == null) {
@@ -983,51 +966,48 @@ public class MainActivity extends BridgeActivity {
         }
 
         try (CountingInputStream countingStream = new CountingInputStream(sourceStream, totalBytes, this);
-             ZipInputStream zipStream = new ZipInputStream(countingStream)) {
+             ZipInputStream zipStream = new ZipInputStream(new BufferedInputStream(countingStream, 65536))) {
             sendImportProgress(5, "백업 파일을 열었습니다.");
             byte[] buffer = new byte[65536];
             ZipEntry entry;
             while ((entry = zipStream.getNextEntry()) != null) {
                 String entryName = entry.getName();
-                if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\")) {
+                if (entryName.startsWith("/") || entryName.startsWith("\\")) {
                     throw new IOException("잘못된 백업 경로입니다.");
                 }
 
-                if ("manifest.json".equals(entryName)) {
-                    JSONObject manifest = new JSONObject(readZipText(zipStream, entry));
-                    if (!"AuraSoundBackup".equals(manifest.optString("format"))) {
-                        throw new IOException("AuraSound 백업 파일이 아닙니다.");
-                    }
-                } else if ("tracks.json".equals(entryName)) {
-                    tracksJson = readZipText(zipStream, entry);
-                } else if ("playlists.json".equals(entryName)) {
-                    playlistsJson = readZipText(zipStream, entry);
-                } else if ("appState.json".equals(entryName)) {
-                    appStateJson = readZipText(zipStream, entry);
-                } else if ("artistCovers.json".equals(entryName)) {
-                    artistCoversJson = readZipText(zipStream, entry);
-                } else if (entryName.startsWith("music/") && !entry.isDirectory()) {
+                boolean metadataEntry = BackupMetadata.readEntry(zipStream, entryName, metadata);
+                if (!metadataEntry && entryName.startsWith("music/") && !entry.isDirectory()) {
                     String fileName = entryName.substring("music/".length());
-                    if (fileName.isEmpty() || fileName.contains("/") || fileName.contains("\\")) {
+                    if (fileName.isEmpty() || ".".equals(fileName) || "..".equals(fileName) || fileName.contains("/") || fileName.contains("\\")) {
                         throw new IOException("잘못된 음악 파일 경로입니다.");
                     }
-                    File extractedFile = new File(temporaryDirectory, sanitizeFileName(fileName));
+                    String name = sanitizeFileName(fileName);
+                    if (extractedAudio.containsKey(name)) throw new IOException("백업에 같은 파일 이름이 있습니다: " + name);
+                    File extractedFile = File.createTempFile("audio-", ".part", temporaryDirectory);
                     try (FileOutputStream output = new FileOutputStream(extractedFile, false)) {
-                        int read;
-                        while ((read = zipStream.read(buffer)) != -1) {
-                            output.write(buffer, 0, read);
-                        }
+                        BackupAudio.copy(zipStream, output, buffer);
                     }
+                    extractedAudio.put(name, extractedFile);
                 }
                 zipStream.closeEntry();
             }
         }
 
         sendImportProgress(65, "백업 파일의 정보를 확인하고 있습니다.");
-        JSONArray sourceTracks = new JSONArray(tracksJson);
+        JSONArray sourceTracks = metadata.getJSONArray("tracks");
         JSONArray restoredTracks = new JSONArray();
         JSONArray trackResults = new JSONArray();
         int trackCount = Math.max(1, sourceTracks.length());
+        Map<String, Integer> archiveUses = new HashMap<>();
+        for (int i = 0; i < sourceTracks.length(); i++) {
+            JSONObject track = sourceTracks.optJSONObject(i);
+            if (track != null) {
+                String name = track.optString("backupFile", "");
+                if (!name.isEmpty()) archiveUses.merge(sanitizeFileName(name), 1, Integer::sum);
+            }
+        }
+        byte[] copyBuffer = new byte[65536];
 
         for (int index = 0; index < sourceTracks.length(); index++) {
             JSONObject sourceTrack = sourceTracks.optJSONObject(index);
@@ -1043,18 +1023,26 @@ public class MainActivity extends BridgeActivity {
                         result.put("status", "failed");
                         result.put("reason", "백업 파일 정보가 없습니다.");
                     } else {
-                        File extractedFile = new File(temporaryDirectory, sanitizeFileName(backupFileName));
-                        if (!extractedFile.exists()) {
+                        String entryName = sanitizeFileName(backupFileName);
+                        File extractedFile = extractedAudio.get(entryName);
+                        if (extractedFile == null || !extractedFile.isFile()) {
                             result.put("status", "failed");
                             result.put("reason", "백업 안에서 음악 파일을 찾을 수 없습니다.");
                         } else {
-                            String restoredFileName = uniqueMusicName(extractedFile.getName());
-                            File restoredFile = new File(this.musicDirectory, restoredFileName);
-                            if (!extractedFile.renameTo(restoredFile)) {
+                            String registered = libraryCatalog.readRecord("tracks", trackId);
+                            File existing = registered == null ? null : resolveMusicFile(new JSONObject(registered).optString("filePath"));
+                            // Import merges by track ID. Keep a registered audio file in place.
+                            boolean reuse = existing != null && existing.isFile() && existing.length() > 0;
+                            boolean shared = archiveUses.getOrDefault(entryName, 0) > 1;
+                            String destinationName = shared
+                                    ? sanitizeFileName(trackId) + "_" + sanitizeFileName(sourceTrack.optString("fileName", entryName))
+                                    : entryName;
+                            File restoredFile = reuse ? existing : new File(musicDirectory, uniqueMusicName(destinationName));
+                            if (!reuse && !BackupAudio.restore(extractedFile, restoredFile, shared, copyBuffer)) {
                                 result.put("status", "failed");
                                 result.put("reason", "음악 파일을 저장하지 못했습니다.");
                             } else {
-                                sourceTrack.put("filePath", "Music/" + restoredFileName);
+                                sourceTrack.put("filePath", "Music/" + restoredFile.getName());
                                 sourceTrack.remove("backupFile");
                                 restoredTracks.put(sourceTrack);
                                 result.put("status", "success");
@@ -1075,14 +1063,9 @@ public class MainActivity extends BridgeActivity {
                     "음악 파일을 복원하고 있습니다. (" + completed + "/" + sourceTracks.length() + ")");
         }
 
-        deleteDirectory(temporaryDirectory);
-        JSONObject result = new JSONObject();
-        result.put("tracks", restoredTracks);
-        result.put("trackResults", trackResults);
-        result.put("playlists", new JSONArray(playlistsJson));
-        result.put("appState", new JSONArray(appStateJson));
-        result.put("artistCovers", new JSONObject(artistCoversJson));
-        return result.toString();
+        metadata.put("tracks", restoredTracks);
+        metadata.put("trackResults", trackResults);
+        return metadata.toString();
     }
 
     @Override
@@ -1099,12 +1082,12 @@ public class MainActivity extends BridgeActivity {
             if (i == REQUEST_EXPORT_BACKUP) {
                 final Uri destination = intent.getData();
                 final String backupJson = this.pendingBackupJson;
+                this.pendingBackupJson = null;
                 new Thread(() -> {
                     try {
                         exportBackup(destination, backupJson);
                         sendBackupResult("exported", "");
                     } catch (Exception exception) {
-                        this.pendingBackupJson = null;
                         sendBackupResult("error", exception.getMessage() == null
                                 ? "백업 처리에 실패했습니다." : exception.getMessage());
                     }
@@ -1177,6 +1160,35 @@ public class MainActivity extends BridgeActivity {
     }
 
     public class AuraSoundBridge {
+        @JavascriptInterface
+        public String listMusicFiles() throws IOException {
+            return storedMusicNames().toString();
+        }
+
+        @JavascriptInterface
+        public String describeMusicFile(String name) throws Exception {
+            File file = resolveMusicFile("Music/" + name);
+            if (file == null || !file.isFile()) throw new IOException("음악 파일을 읽을 수 없습니다.");
+            JSONObject metadata = new JSONObject().put("fileSize", file.length()).put("addedAt", file.lastModified());
+            MediaMetadataRetriever tags = new MediaMetadataRetriever();
+            try {
+                tags.setDataSource(file.getAbsolutePath());
+                if (!"yes".equals(tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO))) return null;
+                metadata.put("title", tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE));
+                metadata.put("artist", tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST));
+                metadata.put("album", tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM));
+                metadata.put("trackNumber", tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER));
+                metadata.put("fileType", tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE));
+                String duration = tags.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                if (duration != null) metadata.put("duration", Long.parseLong(duration) / 1000.0);
+            } catch (RuntimeException unreadableTags) {
+                // Media3 also plays some formats that the platform tag reader cannot inspect.
+                if (!name.toLowerCase(Locale.ROOT).matches(".*\\.(mp3|mp4|m4a|aac|flac|wav|ogg|opus|wma|aif|aiff|alac|mka|amr|webm)$")) return null;
+            } finally {
+                tags.release();
+            }
+            return metadata.toString();
+        }
         public AuraSoundBridge() {
         }
 
@@ -1377,7 +1389,9 @@ public class MainActivity extends BridgeActivity {
         public synchronized String beginImport(String str, String str2, String str3) {
             try {
                 return MainActivity.this.beginImport(str, str2);
-            } catch (Exception unused) {
+            } catch (Exception exception) {
+                MainActivity.this.cancelImport();
+                android.util.Log.w("AuraSound", "Could not open music import", exception);
                 return "";
             }
         }

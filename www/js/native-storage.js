@@ -42,7 +42,11 @@ export class NativeMusicStorage {
 
     try {
       for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
-        const buffer = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+        const end = Math.min(offset + CHUNK_SIZE, file.size);
+        const buffer = await file.slice(offset, end).arrayBuffer();
+        if (buffer.byteLength !== end - offset) {
+          throw new Error('음악 파일을 끝까지 읽지 못했습니다.');
+        }
         if (!bridge.appendImport(bytesToBase64(new Uint8Array(buffer)))) {
           throw new Error('음악 파일 복사에 실패했습니다.');
         }

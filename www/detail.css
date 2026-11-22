@@ -238,6 +238,30 @@
 #album-artist-avatar span { font-size: 16px; }
 #view-album-detail .album-artist-row #album-detail-artist { font-size: .875rem; font-weight: 700; color: white; }
 
+.album-track-summary {
+  margin-block: 20px 0;
+  color: var(--text-primary);
+  font-size: .95rem;
+  font-weight: 700;
+}
+
+.album-related { margin-block: 24px 0; }
+.album-related[hidden] { display: none; }
+.album-related .horizontal-scroll {
+  margin-inline: calc(-1 * var(--view-gutter));
+  padding-inline: var(--view-gutter);
+  scroll-padding-inline: var(--view-gutter);
+}
+.album-related .media-card {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+}
+.album-related .home-media-title { display: block; }
+
 #view-folder-detail > .btn-back {
   width: 44px;
   justify-content: center;
@@ -248,10 +272,7 @@
     padding-top: var(--detail-bar-height);
   }
 
-  #view-playlist-detail {
-    --show-playlist-search: 1;
-  }
-  :is(#view-playlist-detail, #view-album-detail) > :is(.detail-search-panel, .playlist-detail-header, .playlist-detail-tools, .track-list) {
+  :is(#view-playlist-detail, #view-album-detail) > :is(.detail-search-panel, .playlist-detail-header, .playlist-detail-tools, .track-list, .album-track-summary, .album-related) {
     width: min(100%, 640px);
     margin-inline: auto;
     padding-inline: 0;

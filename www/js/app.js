@@ -1,7 +1,3 @@
-(function applyDarkThemeEarly() {
-  document.documentElement.setAttribute('data-theme', 'dark');
-})();
-
 window.__auraSoundNativeAction = function(action, value) {
   try {
     if (!window.app || !window.app.player) return;
@@ -67,9 +63,10 @@ window.__auraSoundNativeAction = function(action, value) {
   }
 };
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 const SPLIT_PLAYER_QUERY = '(min-width: 840px)';
 
+import { BackupProgress } from './backup-progress.js';
 import { StorageManager } from './storage.js';
 import { AudioPlayer } from './audio-player.js';
 import { WebAudioPlayer } from './web-audio-player.js';
@@ -153,6 +150,7 @@ class App {
           : '이 음악 파일을 재생할 수 없습니다. 파일이 저장되어 있는지와 브라우저가 지원하는 형식인지 확인해 주세요.');
       });
     }
+    this.backupProgress = new BackupProgress();
     this.overlayStack = [];
     this.coverIconResizeObserver = null;
     this.coverIconMutationObserver = null;
@@ -243,7 +241,7 @@ class App {
     const savedState = new Map((await this.storage.getAllState()).map(entry => [entry.key, entry.value]));
     const getSavedState = key => savedState.has(key) ? savedState.get(key) : null;
 
-    this.setTheme();
+    this.setTheme(getSavedState('theme'));
 
     const savedVolume =
       getSavedState('volume');
@@ -447,10 +445,10 @@ class App {
     return false;
   }
 
-  setTheme() {
+  setTheme(savedTheme) {
     this.state.settings.theme = 'dark';
-    localStorage.setItem('theme', 'dark');
-    void this.storage.saveStateKey('theme', 'dark');
+    if (localStorage.getItem('theme') !== 'dark') localStorage.setItem('theme', 'dark');
+    if (savedTheme !== 'dark') void this.storage.saveStateKey('theme', 'dark');
     document.documentElement.setAttribute('data-theme', 'dark');
   }
 
@@ -768,6 +766,10 @@ class App {
     let timeUiFrame = 0;
     let lastMediaPositionUpdate = 0;
     let latestTimeUiState = null;
+    const seekBar = document.getElementById('full-seek-bar');
+    const progress = document.getElementById('mini-progress-fill');
+    const currentLabel = document.getElementById('time-current');
+    const durationLabel = document.getElementById('time-duration');
 
     this.player.on(
       'timeupdate',
@@ -781,17 +783,11 @@ class App {
             const latest = latestTimeUiState;
             if (!latest) return;
 
-            const seekBar = document.getElementById('full-seek-bar');
-            const progress = document.getElementById('mini-progress-fill');
-            const currentLabel = document.getElementById('time-current');
-            const durationLabel = document.getElementById('time-duration');
-
             if (seekBar) {
               seekBar.value = latest.pct;
               seekBar.style.setProperty('--seek-progress', `${latest.pct}%`);
             }
             if (progress) progress.style.setProperty('--mini-progress', String(latest.pct / 100));
-            document.getElementById('mini-player')?.style.setProperty('--mini-progress', String(latest.pct / 100));
             const currentText = formatTime(latest.currentTime);
             const durationText = formatTime(latest.duration);
             if (currentLabel && currentLabel.textContent !== currentText) currentLabel.textContent = currentText;
@@ -900,7 +896,7 @@ class App {
             if (e.target === el) {
               if (el.classList.contains('bottom-sheet-overlay')) {
                 this.closeOverlayWithAnimation(el.id);
-              } else {
+              } else if (!this.musicImportInProgress) {
                 el.classList.remove('active');
               }
             }
@@ -912,6 +908,7 @@ class App {
       'keydown',
       e => {
         if (e.key === 'Escape') {
+          if (this.musicImportInProgress) return;
           document
             .querySelectorAll('.active')
             .forEach(el => {
@@ -1025,10 +1022,10 @@ class App {
     try {
       const audio = document.createElement('audio');
       audio.preload = 'metadata';
-      audio.src = url;
 
       return await new Promise((resolve, reject) => {
         const cleanup = () => {
+          clearTimeout(timeout);
           audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
           audio.removeEventListener('error', handleError);
           audio.removeAttribute('src');
@@ -1046,8 +1043,13 @@ class App {
           reject(new Error('오디오 메타데이터를 읽을 수 없습니다.'));
         };
 
+        const timeout = setTimeout(() => {
+          cleanup();
+          resolve(0);
+        }, 5000);
         audio.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
         audio.addEventListener('error', handleError, { once: true });
+        audio.src = url;
       });
     } finally {
       URL.revokeObjectURL(url);
@@ -1060,18 +1062,25 @@ class App {
       return;
     }
 
+    if (window.__auraSoundBackupBusy) return;
+    window.__auraSoundBackupBusy = true;
     try {
       const [tracks, playlists, appState] = await Promise.all([
         this.storage.getAllTracks(),
         this.storage.getAllPlaylists(),
         this.storage.getAllState()
       ]);
+      if (!tracks.length && window.AuraSoundNative.listMusicFiles &&
+          JSON.parse(window.AuraSoundNative.listMusicFiles()).length) {
+        window.__auraSoundBackupBusy = false;
+        alert('음악 폴더에 파일이 남아 있어 빈 백업을 저장할 수 없습니다. 기존 백업을 보관해 주세요.');
+        return;
+      }
       const exportTracks = tracks.map((track, index) => ({
         ...track,
         backupFile: `${String(index + 1).padStart(4, '0')}_${(track.id || `track_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '_')}_${(track.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_')}`
       }));
 
-      window.__auraSoundBackupBusy = true;
       window.AuraSoundNative.exportBackup(JSON.stringify({
         tracks: exportTracks,
         playlists,
@@ -1093,82 +1102,28 @@ class App {
       return;
     }
 
+    if (window.__auraSoundBackupBusy) return;
     if (!(await showAuraDialog('백업 파일의 음악과 플레이리스트를 현재 라이브러리에 추가할까요?\n기존 데이터는 삭제되지 않습니다.', { confirm: true, title: '백업 불러오기' }))) return;
+    if (window.__auraSoundBackupBusy) return;
     window.__auraSoundBackupBusy = true;
-    window.AuraSoundNative.importBackup();
-  }
-
-  ensureImportProgressUI() {
-    let panel = document.getElementById('aura-import-progress');
-    if (panel) return panel;
-    panel = document.createElement('div');
-    panel.id = 'aura-import-progress';
-    panel.className = 'aura-import-progress-overlay';
-    panel.innerHTML = `
-      <section class="aura-import-progress-panel" role="dialog" aria-modal="true" aria-labelledby="aura-import-title">
-        <h2 id="aura-import-title">백업 불러오기</h2>
-        <p id="aura-import-message">불러오기를 준비하고 있습니다.</p>
-        <div class="aura-import-progress-track"><div id="aura-import-progress-fill"></div></div>
-        <div class="aura-import-progress-meta"><span id="aura-import-percent">0%</span><span id="aura-import-count"></span></div>
-        <div id="aura-import-results" class="aura-import-results" aria-live="polite"></div>
-        <button id="aura-import-close" class="btn-primary" type="button" hidden>닫기</button>
-      </section>`;
-    document.body.appendChild(panel);
-    panel.querySelector('#aura-import-close').addEventListener('click', () => panel.remove());
-    return panel;
-  }
-
-  updateImportProgress(payload) {
-    let data = {};
-    try { data = JSON.parse(payload || '{}'); } catch (_) {}
-    const panel = this.ensureImportProgressUI();
-    const percent = Math.max(0, Math.min(100, Number(data.percent) || 0));
-    panel.querySelector('#aura-import-message').textContent = data.message || '불러오는 중입니다.';
-    panel.querySelector('#aura-import-progress-fill').style.width = `${percent}%`;
-    panel.querySelector('#aura-import-percent').textContent = `${percent}%`;
-    panel.querySelector('#aura-import-close').hidden = true;
-  }
-
-  showImportSummary(results, addedTracks, addedPlaylists) {
-    const panel = this.ensureImportProgressUI();
-    panel.querySelector('#aura-import-message').textContent = `완료: 음악 ${addedTracks}곡, 플레이리스트 ${addedPlaylists}개 추가`;
-    panel.querySelector('#aura-import-progress-fill').style.width = '100%';
-    panel.querySelector('#aura-import-percent').textContent = '100%';
-    const successCount = results.filter(item => item.status === 'success').length;
-    const failedCount = results.filter(item => item.status === 'failed').length;
-    const skippedCount = results.filter(item => item.status === 'skipped').length;
-    panel.querySelector('#aura-import-count').textContent = `성공 ${successCount} · 실패 ${failedCount} · 건너뜀 ${skippedCount}`;
-    const list = panel.querySelector('#aura-import-results');
-    list.replaceChildren();
-    if (!results.length) {
-      const empty = document.createElement('p');
-      empty.textContent = '곡별 결과가 없습니다.';
-      list.appendChild(empty);
-    } else {
-      results.forEach(item => {
-        const row = document.createElement('div');
-        row.className = `aura-import-result ${item.status || 'failed'}`;
-        const title = document.createElement('span');
-        title.className = 'aura-import-result-title';
-        title.textContent = item.title || item.fileName || '이름 없는 곡';
-        const status = document.createElement('span');
-        status.className = 'aura-import-result-status';
-        status.textContent = item.status === 'success' ? '성공' : item.status === 'skipped' ? '건너뜀' : '실패';
-        row.append(title, status);
-        if (item.reason) {
-          const reason = document.createElement('small');
-          reason.textContent = item.reason;
-          row.appendChild(reason);
-        }
-        list.appendChild(row);
-      });
+    try {
+      window.AuraSoundNative.importBackup();
+    } catch (error) {
+      await this.handleBackupResult('error', error.message);
     }
-    panel.querySelector('#aura-import-close').hidden = false;
   }
 
   async handleBackupResult(type, payload) {
     if (type === 'progress') {
-      this.updateImportProgress(payload);
+      this.backupProgress.updateImportProgress(payload);
+      return;
+    }
+    if (type === 'imported') {
+      try {
+        await this.applyImportedBackup(payload);
+      } finally {
+        window.__auraSoundBackupBusy = false;
+      }
       return;
     }
     window.__auraSoundBackupBusy = false;
@@ -1185,88 +1140,121 @@ class App {
       alert('AuraSound 백업 파일을 저장했습니다.');
       return;
     }
-    if (type !== 'imported') return;
+  }
 
+  async applyImportedBackup(payload) {
+
+    let data;
+    let trackResults = [];
+    let addedTracks = 0;
+    let addedPlaylists = 0;
     try {
-      const data = JSON.parse(payload || '{}');
+      data = JSON.parse(payload || '{}');
       const importedTracks = Array.isArray(data.tracks) ? data.tracks : [];
       const importedPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
-      const importedState = Array.isArray(data.appState) ? data.appState : [];
-      const importedArtistCovers = data.artistCovers && typeof data.artistCovers === 'object' ? data.artistCovers : {};
-      const importedAlbumCovers = data.albumCovers && typeof data.albumCovers === 'object' ? data.albumCovers : {};
-      const importedAlbumTrackOrder = data.albumTrackOrder && typeof data.albumTrackOrder === 'object' ? data.albumTrackOrder : {};
-      const trackResults = Array.isArray(data.trackResults) ? data.trackResults.map(item => ({ ...item })) : [];
+      trackResults = Array.isArray(data.trackResults) ? data.trackResults.map(item => ({ ...item })) : [];
       const resultById = new Map(trackResults.filter(item => item.id).map(item => [item.id, item]));
 
-      const existingIds = new Set(this.state.tracks.map(track => track.id));
-      const importedIdMap = new Map();
-      let addedTracks = 0;
+      const existingTracks = new Map(this.state.tracks.map(track => [track.id, track]));
 
       for (const track of importedTracks) {
         if (!track?.id) continue;
-        if (existingIds.has(track.id)) {
+        const existing = existingTracks.get(track.id);
+        if (existing) {
+          if (existing.recoveredFromFile || (track.filePath !== existing.filePath &&
+              window.AuraSoundNative.getMusicFileSize(existing.filePath) <= 0)) {
+            const restored = { ...existing, ...track };
+            if (!track.recoveredFromFile) delete restored.recoveredFromFile;
+            await this.storage.saveTrack(restored);
+            Object.assign(existing, restored);
+            if (!track.recoveredFromFile) delete existing.recoveredFromFile;
+            continue;
+          }
           const previous = resultById.get(track.id);
           if (previous) { previous.status = 'skipped'; previous.reason = '같은 ID의 곡이 이미 보관함에 있습니다.'; }
           else { const skipped = { id: track.id, title: track.title || track.fileName || '이름 없는 곡', status: 'skipped', reason: '같은 ID의 곡이 이미 보관함에 있습니다.' }; trackResults.push(skipped); resultById.set(track.id, skipped); }
           continue;
         }
+        await this.storage.saveTrack(track);
         this.state.tracks.push(track);
-        existingIds.add(track.id);
-        importedIdMap.set(track.id, track.id);
+        existingTracks.set(track.id, track);
         const successfulResult = resultById.get(track.id);
         if (successfulResult) { successfulResult.status = 'success'; successfulResult.reason = '불러오기 성공'; }
         else { const addedResult = { id: track.id, title: track.title || track.fileName || '이름 없는 곡', status: 'success', reason: '불러오기 성공' }; trackResults.push(addedResult); resultById.set(track.id, addedResult); }
-        await this.storage.saveTrack(track);
         addedTracks++;
       }
 
       const existingPlaylistIds = new Set(this.state.playlists.map(playlist => playlist.id));
-      let addedPlaylists = 0;
       for (const playlist of importedPlaylists) {
         if (!playlist?.id || existingPlaylistIds.has(playlist.id)) continue;
         const trackIds = Array.isArray(playlist.trackIds)
-          ? playlist.trackIds.filter(id => importedIdMap.has(id) || existingIds.has(id))
+          ? playlist.trackIds.filter(id => existingTracks.has(id))
           : [];
         const nextPlaylist = { ...playlist, trackIds };
+        await this.storage.savePlaylist(nextPlaylist);
         this.state.playlists.push(nextPlaylist);
         existingPlaylistIds.add(nextPlaylist.id);
-        await this.storage.savePlaylist(nextPlaylist);
         addedPlaylists++;
       }
-
-      const existingArtistCovers = JSON.parse(localStorage.getItem('auraArtistCovers') || '{}');
-      Object.entries(importedArtistCovers).forEach(([artistName, coverData]) => {
-        if (artistName && coverData) existingArtistCovers[artistName] = coverData;
-      });
-      localStorage.setItem('auraArtistCovers', JSON.stringify(existingArtistCovers));
-      const existingAlbumCovers = this.getStoredAlbumCovers();
-      Object.entries(importedAlbumCovers).forEach(([albumId, coverData]) => {
-        if (albumId && coverData) existingAlbumCovers[albumId] = coverData;
-      });
-      localStorage.setItem('auraAlbumCovers', JSON.stringify(existingAlbumCovers));
-      const existingAlbumTrackOrder = this.getStoredAlbumTrackOrders();
-      Object.entries(importedAlbumTrackOrder).forEach(([albumId, order]) => {
-        if (albumId && Array.isArray(order)) existingAlbumTrackOrder[albumId] = order;
-      });
-      localStorage.setItem('auraAlbumTrackOrder', JSON.stringify(existingAlbumTrackOrder));
-
-      for (const item of importedState) {
-        if (!item?.key) continue;
-        const exists = await this.storage.getStateKey(item.key);
-        if (exists === null || exists === undefined) {
-          await this.storage.saveStateKey(item.key, item.value);
-        }
-      }
-
-      this.renderAll();
-      this.updateSettingsUI();
-      this.showImportSummary(trackResults, addedTracks, addedPlaylists);
     } catch (error) {
       console.error('[AuraSound Backup] 불러오기 적용 실패:', error);
+      const message = addedTracks || addedPlaylists
+        ? `음악 ${addedTracks}곡, 플레이리스트 ${addedPlaylists}개를 추가했습니다. 나머지 데이터를 저장하지 못했습니다.`
+        : '백업 파일을 적용하지 못했습니다.';
       const panel = document.getElementById('aura-import-progress');
-      if (panel) { panel.querySelector('#aura-import-message').textContent = '백업 파일을 적용하지 못했습니다.'; panel.querySelector('#aura-import-close').hidden = false; }
-      else alert('백업 파일을 적용하지 못했습니다.');
+      if (panel) {
+        panel.querySelector('#aura-import-message').textContent = message;
+        panel.querySelector('#aura-import-close').hidden = false;
+      } else alert(message);
+      return;
     }
+
+    const warnings = await this.restoreBackupPreferences(data);
+    try {
+      this.renderAll();
+      this.updateSettingsUI();
+    } catch (error) {
+      console.warn('[AuraSound Backup] 보관함 화면 갱신 실패:', error);
+      warnings.push('화면을 갱신하지 못했습니다. 앱을 다시 열면 저장된 보관함을 확인할 수 있습니다.');
+    }
+    this.backupProgress.showImportSummary(trackResults, addedTracks, addedPlaylists, warnings);
+  }
+
+  async restoreBackupPreferences(data) {
+    const failed = [];
+    const fields = [
+      ['auraArtistCovers', data.artistCovers, '아티스트 커버', value => typeof value === 'string' && value],
+      ['auraAlbumCovers', data.albumCovers, '앨범 커버', value => typeof value === 'string' && value],
+      ['auraAlbumTrackOrder', data.albumTrackOrder, '앨범 곡 순서', Array.isArray]
+    ];
+    for (const [key, values, label, isValid] of fields) {
+      if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+      const entries = Object.entries(values).filter(([id, value]) => id && isValid(value));
+      if (!entries.length) continue;
+      try {
+        const existing = this.getStoredLocalObject(key);
+        if (entries.every(([id, value]) => existing[id] === value)) continue;
+        const merged = { ...existing, ...Object.fromEntries(entries) };
+        localStorage.setItem(key, JSON.stringify(merged));
+      } catch (error) {
+        console.warn('[AuraSound Backup] 복원 실패:', label, error);
+        failed.push(label);
+      }
+    }
+
+    let settingsFailed = false;
+    for (const item of Array.isArray(data.appState) ? data.appState : []) {
+      if (typeof item?.key !== 'string' || !item.key || !Object.hasOwn(item, 'value')) continue;
+      try {
+        const exists = await this.storage.getStateKey(item.key);
+        if (exists == null) await this.storage.saveStateKey(item.key, item.value);
+      } catch (error) {
+        console.warn('[AuraSound Backup] 설정 복원 실패:', item.key, error);
+        settingsFailed = true;
+      }
+    }
+    if (settingsFailed) failed.push('일부 설정');
+    return failed.length ? [`복원하지 못한 항목: ${failed.join(', ')}`] : [];
   }
 
   async migrateTracksToNativeStorage() {
@@ -2674,6 +2662,10 @@ class App {
   }
 
   handleFileImport(e) {
+    if (this.musicImportInProgress) {
+      e.target.value = '';
+      return;
+    }
     const files =
       Array.from(
         e.target.files
@@ -2683,8 +2675,18 @@ class App {
       return;
     }
 
+    const usedIds = new Set(this.state.tracks.map(track => track.id));
+    const timestamp = Date.now();
+    const suffixCount = 36 ** 5;
+    let suffix = Math.floor(Math.random() * suffixCount);
     const pendingTracks =
       files.map(file => {
+        let id;
+        do {
+          id = `track_${timestamp}_${suffix.toString(36)}`;
+          suffix = (suffix + 1) % suffixCount;
+        } while (usedIds.has(id));
+        usedIds.add(id);
         let title =
           file.name.replace(
             /\.[^/.]+$/,
@@ -2709,13 +2711,7 @@ class App {
         }
 
         return {
-          id:
-            'track_' +
-            Date.now() +
-            '_' +
-            Math.random()
-              .toString(36)
-              .substr(2, 5),
+          id,
 
           title,
           artist,
@@ -2896,143 +2892,100 @@ class App {
       </div>
     `;
 
-    this.showModal(
-      '음악 추가',
-      bodyHtml,
-      async () => {
-        const selectedIds = new Set(
-          Array.from(
-            document.querySelectorAll(
-              '.pending-track-checkbox:checked'
-            )
-          ).map(
-            cb => cb.value
-          ));
+    const byId = new Map(pendingTracks.map(track => [track.id, track]));
+    const saveSelection = async () => {
+      if (this.musicImportInProgress) return;
+      const selectedTracks = pendingTracks.filter(track => track._checked);
+      if (!selectedTracks.length) {
+        alert('추가할 음악을 선택해 주세요.');
+        return;
+      }
 
-        const selectedTracks =
-          pendingTracks.filter(
-            t =>
-              selectedIds.has(
-                t.id
-              )
-          );
-
-        for (const track of selectedTracks) {
+      const confirm = document.getElementById('btn-modal-confirm');
+      const cancel = document.getElementById('btn-modal-cancel');
+      const search = document.getElementById('pending-search-input');
+      const list = document.getElementById('pending-list-container');
+      this.musicImportInProgress = true;
+      confirm.disabled = cancel.disabled = search.disabled = list.inert = true;
+      const failures = [];
+      try {
+        for (const [index, track] of selectedTracks.entries()) {
+          confirm.textContent = `저장 중 (${index + 1}/${selectedTracks.length})`;
           try {
-            if (!track.duration || track.duration <= 0) {
-              track.duration = await this.resolveTrackDuration(track);
-            }
-
-            if (NativeMusicStorage.isAvailable()) {
-              track.filePath = await NativeMusicStorage.importFile(
-                track.fileBlob,
-                track.id
-              );
-              track.folderPath = 'Music';
-              track.folderName = 'AuraSound Music';
-              track.fileSize = track.fileBlob.size;
-              track.fileType = track.fileBlob.type || track.fileType || 'audio/*';
-              delete track.fileBlob;
-            }
-
-            if (this.browserAudio) {
-              await this.storage.saveBrowserTrack(track);
-              delete track.fileBlob;
-            } else {
-              await this.storage.saveTrack(track);
-            }
-            this.state.tracks.push(track);
+            await this.saveSelectedMusic(track);
           } catch (error) {
             console.error('[AuraSound Storage] 음악 저장 실패:', track.fileName, error);
-            alert(`${track.fileName}을(를) 저장하지 못했습니다.`);
+            failures.push(`${track.fileName} — ${error.message || '파일 저장 오류'}`);
           }
         }
-
-        this.renderAll();
-        this.updateSettingsUI();
-
-        document
-          .getElementById(
-            'modal-overlay'
-          )
-          .classList.remove(
-            'active'
-          );
+      } finally {
+        this.musicImportInProgress = false;
+        confirm.disabled = cancel.disabled = search.disabled = list.inert = false;
+        confirm.onclick = null;
+        document.getElementById('modal-body').replaceChildren();
+        document.getElementById('modal-overlay').classList.remove('active');
+        this.sendNativeMessage('overlay', { open: false, type: 'modal' });
       }
-    );
 
-    document
-      .getElementById(
-        'pending-search-input'
-      )
-      .addEventListener(
-        'input',
-        e => {
-          const q =
-            e.target.value
-              .toLowerCase();
+      this.renderAll();
+      this.updateSettingsUI();
+      if (failures.length) {
+        const savedCount = selectedTracks.length - failures.length;
+        alert(`음악 ${savedCount}곡을 추가했습니다. ${failures.length}곡을 저장하지 못했습니다.\n${failures.join('\n')}`);
+      }
+    };
 
-          const currentChecked =
-            new Set(
-              Array.from(
-                document.querySelectorAll(
-                  '.pending-track-checkbox:checked'
-                )
-              ).map(
-                cb => cb.value
-              )
-            );
-
-          const currentUnchecked =
-            new Set(
-              Array.from(
-                document.querySelectorAll(
-                  '.pending-track-checkbox:not(:checked)'
-                )
-              ).map(
-                cb => cb.value
-              )
-            );
-
-          pendingTracks.forEach(t => {
-            if (
-              currentChecked.has(
-                t.id
-              )
-            ) {
-              t._checked = true;
-            }
-
-            if (
-              currentUnchecked.has(
-                t.id
-              )
-            ) {
-              t._checked = false;
-            }
-          });
-
-          const filtered =
-            pendingTracks.filter(
-              t =>
-                t.title
-                  .toLowerCase()
-                  .includes(q) ||
-                t.artist
-                  .toLowerCase()
-                  .includes(q)
-            );
-
-          document
-            .getElementById(
-              'pending-list-container'
-            )
-            .innerHTML =
-            renderList(
-              filtered
-            );
-        }
+    this.showModal('음악 추가', bodyHtml, saveSelection);
+    const list = document.getElementById('pending-list-container');
+    list.addEventListener('change', event => {
+      const input = event.target;
+      const track = byId.get(input.value);
+      if (track) track._checked = input.checked;
+    });
+    document.getElementById('pending-search-input').addEventListener('input', event => {
+      const query = event.target.value.toLowerCase();
+      const filtered = pendingTracks.filter(track =>
+        track.title.toLowerCase().includes(query) || track.artist.toLowerCase().includes(query)
       );
+      list.innerHTML = renderList(filtered);
+    });
+  }
+
+  async saveSelectedMusic(pendingTrack) {
+    const { fileBlob, _checked, ...track } = pendingTrack;
+    if (!fileBlob?.size) throw new Error('파일이 비어 있습니다.');
+
+    let importedPath;
+    try {
+      if (NativeMusicStorage.isAvailable()) {
+        importedPath = await NativeMusicStorage.importFile(fileBlob, track.id);
+        track.filePath = importedPath;
+        track.folderPath = 'Music';
+        track.folderName = 'AuraSound Music';
+        track.duration = NativeMusicStorage.getDuration(importedPath);
+      } else {
+        try {
+          track.duration = await this.resolveTrackDuration({ ...track, fileBlob });
+        } catch (error) {
+          console.warn('[AuraSound Duration] 곡 길이 확인 실패:', track.fileName, error);
+        }
+      }
+
+      if (this.browserAudio) await this.storage.saveBrowserTrack({ ...track, fileBlob });
+      else await this.storage.saveTrack(track);
+    } catch (error) {
+      if (importedPath) {
+        try {
+          if (!NativeMusicStorage.deleteFile(importedPath)) {
+            console.warn('[AuraSound Storage] 추가되지 않은 음악 파일을 정리하지 못했습니다:', importedPath);
+          }
+        } catch (cleanupError) {
+          console.warn('[AuraSound Storage] 음악 파일 정리 실패:', cleanupError);
+        }
+      }
+      throw error;
+    }
+    this.state.tracks.push(track);
   }
 
   normalizePlaybackContext(sourceContext, track) {
@@ -3427,14 +3380,15 @@ class App {
     const content = document.querySelector('.content-area');
     const activeView = document.querySelector('.view.active');
     const search = this._collectionDetail?.searchAboveCover;
-    const searchHasQuery = search?.querySelector('input').value.trim();
-    const showSearch = search && getComputedStyle(search).getPropertyValue('--show-playlist-search').trim() === '1';
-    if (content) content.scrollTop = search && !showSearch && !searchHasQuery ? search.offsetHeight : 0;
+    const input = search?.querySelector('input');
+    const showSearch = input?.value.trim() || (input && input === document.activeElement);
+    if (content) content.scrollTop = search && !showSearch ? search.offsetHeight : 0;
     if (activeView) activeView.scrollTop = 0;
     this.updateCollectionDetailScroll();
   }
 
   setCollectionDetailView(view) {
+    this._collectionDetail?.pendingArtworkLoad?.abort();
     this._collectionDetail = null;
     const isDetail = Boolean(view?.classList.contains('collection-detail'));
     document.getElementById('app')?.classList.toggle('detail-view-open', isDetail);
@@ -3459,6 +3413,7 @@ class App {
   }
 
   updateCollectionDetailArtworkColor(detail) {
+    detail.pendingArtworkLoad?.abort();
     const { view, artwork } = detail;
     view.style.removeProperty('--detail-artwork-color');
     const image = artwork.querySelector('img');
@@ -3469,7 +3424,10 @@ class App {
       if (color) view.style.setProperty('--detail-artwork-color', color);
     };
     if (image.complete) applyColor();
-    else image.addEventListener('load', applyColor, { once: true });
+    else {
+      detail.pendingArtworkLoad = new AbortController();
+      image.addEventListener('load', applyColor, { once: true, signal: detail.pendingArtworkLoad.signal });
+    }
   }
 
   updateCollectionDetailScroll() {
@@ -3512,17 +3470,49 @@ class App {
         this.updateCollectionDetailScroll();
       });
     };
-    content.addEventListener('scroll', requestUpdate, { passive: true });
+    let previousTop = content.scrollTop;
+    let movingTowardTop = false;
+    let scrollEndTimer;
+    const supportsScrollEnd = 'onscrollend' in content;
+    const settleDetailScroll = () => {
+      const search = this._collectionDetail?.searchAboveCover;
+      if (search) {
+        const height = search.offsetHeight;
+        const top = content.scrollTop;
+        // Only settle the search reveal interval. The cover collapse remains freely scrollable.
+        if (top <= 0 || top >= height || search.contains(document.activeElement)) return;
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        content.scrollTo({ top: top < height / 2 ? 0 : height, behavior: reducedMotion ? 'instant' : 'smooth' });
+        return;
+      }
+      // Leave the artist page wherever a gesture toward the tracks ends.
+      if (!this._collectionDetail?.isArtist || !movingTowardTop || content.scrollTop <= 0 || content.scrollTop > 56) return;
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      content.scrollTo({ top: 0, behavior: reducedMotion ? 'instant' : 'smooth' });
+    };
+    content.addEventListener('scroll', () => {
+      const top = content.scrollTop;
+      if (top !== previousTop) movingTowardTop = top < previousTop;
+      previousTop = top;
+      requestUpdate();
+      if (!supportsScrollEnd) {
+        clearTimeout(scrollEndTimer);
+        if (this._collectionDetail) scrollEndTimer = setTimeout(settleDetailScroll, 160);
+      }
+    }, { passive: true });
+    if (supportsScrollEnd) content.addEventListener('scrollend', settleDetailScroll);
     window.addEventListener('resize', requestUpdate, { passive: true });
     if (typeof ResizeObserver === 'function') new ResizeObserver(requestUpdate).observe(content);
     document.fonts?.ready.then(requestUpdate);
   }
 
   setupMarqueeObserver() {
-    if (this._marqueeObserver) this._marqueeObserver.disconnect();
+    if (this._marqueeObserver) return;
     const root = document.getElementById('app') || document.body;
     let timer = 0;
-    this._marqueeObserver = new MutationObserver(() => {
+    this._marqueeObserver = new MutationObserver(mutations => {
+      if (document.visibilityState === 'hidden' || mutations.every(({ target }) =>
+        target.id === 'time-current' || target.id === 'time-duration')) return;
       clearTimeout(timer);
       timer = setTimeout(() => this.safeApplyMarquee(), 40);
     });
@@ -3838,23 +3828,35 @@ class App {
     }
   }
 
-  rememberDetailBackView(targetView) {
+  rememberDetailBackView(targetView, albumId) {
     const currentView = this.state.activeView;
-    if (currentView && currentView !== targetView) {
+    const changingAlbum = currentView === 'album-detail' && albumId && albumId !== this.state.albumDetailId;
+    if (currentView && (currentView !== targetView || changingAlbum)) {
       const stack = this.state.detailBackStack || (this.state.detailBackStack = []);
-      stack.push(currentView);
+      const entry = currentView === 'album-detail'
+        ? {
+            view: currentView,
+            albumId: this.state.albumDetailId,
+            scrollTop: document.getElementById('content-area').scrollTop,
+            scrollLeft: document.getElementById('album-related-list').scrollLeft
+          }
+        : { view: currentView };
+      stack.push(entry);
       this.state.detailBackView = currentView;
     }
   }
 
   navigateBackFromDetail() {
     const stack = this.state.detailBackStack || (this.state.detailBackStack = []);
-    const previousView = stack.pop()
-      || this.state.previousView
-      || 'library';
-    this.state.detailBackView = stack.length
-      ? stack[stack.length - 1]
-      : previousView;
+    const entry = stack.pop();
+    const previousView = entry?.view || this.state.previousView || 'library';
+    this.state.detailBackView = stack[stack.length - 1]?.view || previousView;
+    if (entry?.albumId && this.openAlbumDetail(entry.albumId, { rememberBack: false })) {
+      document.getElementById('content-area').scrollTop = entry.scrollTop;
+      document.getElementById('album-related-list').scrollLeft = entry.scrollLeft;
+      this.updateCollectionDetailScroll();
+      return;
+    }
     this.switchView(previousView);
   }
 
@@ -3866,6 +3868,7 @@ class App {
   handleBackNavigation() {
     const modal = document.getElementById('modal-overlay');
     if (modal?.classList.contains('active')) {
+      if (this.musicImportInProgress) return true;
       this.scrollMainContentToTop();
       modal.classList.remove('active');
       this.sendNativeMessage('overlay', { open: false, type: 'modal' });
@@ -3952,14 +3955,11 @@ class App {
   }
 
   renderAll() {
-    this.renderHome();
-
-    this.renderLibrary(
-      document.getElementById(
-        'library-search-input'
-      ).value
-    );
-
+    // switchView renders the other browse tab when it becomes visible.
+    if (this.state.activeView === 'home') this.renderHome();
+    if (this.state.activeView === 'library') {
+      this.renderLibrary(document.getElementById('library-search-input').value);
+    }
     this.updateSelectionBar();
 
     setTimeout(
@@ -4019,9 +4019,7 @@ class App {
       playCount: album.tracks.reduce((sum, track) => sum + (track.playCount || 0), 0)
     }));
 
-    const recentPlaylists = [...this.state.playlists]
-      .filter(playlist => playlist.lastPlayedAt)
-      .sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+    const recentPlaylists = this.state.playlists.filter(playlist => playlist.lastPlayedAt);
 
     const recentEntities = [
       ...albumItems.filter(album => album.lastPlayedAt).map(item => ({ type: 'album', item, lastPlayedAt: item.lastPlayedAt, key: `album:${item.id}` })),
@@ -4030,17 +4028,13 @@ class App {
     ].sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
 
     const quickItems = [];
-    const pushQuick = entry => {
-      if (!quickItems.some(existing => existing.key === entry.key)) quickItems.push(entry);
-    };
-    recentEntities.forEach(entry => pushQuick({
-      key: entry.key,
-      type: entry.type,
-      item: entry.item,
-      score: entry.lastPlayedAt
-    }));
-    quickItems.sort((a, b) => b.score - a.score);
-    quickGrid.innerHTML = '';
+    const quickKeys = new Set();
+    for (const entry of recentEntities) {
+      if (quickKeys.has(entry.key)) continue;
+      quickKeys.add(entry.key);
+      quickItems.push(entry);
+      if (quickItems.length === 6) break;
+    }
 
     const createEntityCard = (entry, compact = false) => {
       const card = document.createElement('div');
@@ -4101,14 +4095,13 @@ class App {
       return card;
     };
 
-    quickItems.slice(0, 6).forEach(entry => quickGrid.appendChild(createEntityCard(entry, true)));
+    quickGrid.replaceChildren(...quickItems.map(entry => createEntityCard(entry, true)));
     this.updateHomeNowPlayingIndicators();
 
     const recent = document.getElementById('home-recently-played');
     if (recent) {
-      recent.innerHTML = '';
-      recentEntities.slice(0, 10).forEach(entry => recent.appendChild(createEntityCard(entry, false)));
-      if (!recent.children.length) recent.innerHTML = '<p class="track-artist">최근 재생한 앨범, 아티스트 또는 플레이리스트가 없습니다.</p>';
+      if (recentEntities.length) recent.replaceChildren(...recentEntities.slice(0, 10).map(entry => createEntityCard(entry)));
+      else recent.innerHTML = '<p class="track-artist">최근 재생한 앨범, 아티스트 또는 플레이리스트가 없습니다.</p>';
     }
 
     const topContainer = document.getElementById('home-top-played');
@@ -4526,8 +4519,8 @@ class App {
     this.showModal('앨범 수록곡 순서 편집', `<p class="editor-help-text">왼쪽의 = 버튼을 누른 상태로 위아래로 움직여 순서를 변경하세요.</p><div class="modal-body-scroll playlist-edit-scroll"><div id="album-drag-list">${tracksHtml || '<p>음악이 없습니다.</p>'}</div></div>`, async () => {
       const list = document.getElementById('album-drag-list');
       if (list) {
-        const orders = this.getStoredAlbumTrackOrders();
-        orders[albumId] = [...list.querySelectorAll('.album-drag-item')].map(el => el.dataset.id);
+        const order = [...list.querySelectorAll('.album-drag-item')].map(el => el.dataset.id);
+        const orders = { ...this.getStoredAlbumTrackOrders(), [albumId]: order };
         localStorage.setItem('auraAlbumTrackOrder', JSON.stringify(orders));
         this.renderAlbumTracks(albumId);
         this.renderLibrary(document.getElementById('library-search-input')?.value || '');
@@ -4548,8 +4541,7 @@ class App {
       extraHTML: '<p class="editor-help-text">앨범 커버는 이 앨범의 커버를 따르는 곡에도 적용됩니다.</p>',
       onSave: async ({ cropData }) => {
         if (!cropData) { alert('이미지를 선택하거나 기존 사진을 조절해주세요.'); throw new Error('커버 이미지가 없습니다.'); }
-        const covers = this.getStoredAlbumCovers();
-        covers[albumId] = cropData;
+        const covers = { ...this.getStoredAlbumCovers(), [albumId]: cropData };
         localStorage.setItem('auraAlbumCovers', JSON.stringify(covers));
       },
       afterSave: async () => {
@@ -4585,17 +4577,18 @@ class App {
     });
   }
 
-  openAlbumDetail(albumId) {
-    const album = this.getAlbumGroups().find(item => item.id === albumId);
-    if (!album) return;
-    this.rememberDetailBackView('album-detail');
+  openAlbumDetail(albumId, { rememberBack = true } = {}) {
+    const albums = this.getAlbumGroups();
+    const album = albums.find(item => item.id === albumId);
+    if (!album) return false;
+    if (rememberBack) this.rememberDetailBackView('album-detail', albumId);
     this.state.albumDetailId = albumId;
     const albumMoreButton = document.getElementById('btn-album-more');
     if (albumMoreButton) albumMoreButton.onclick = () => this.openAlbumMenu(albumId);
     document.getElementById('album-detail-title').textContent = album.name;
     document.getElementById('album-detail-artist').textContent = album.artist || '알 수 없는 아티스트';
     this.setCoverElement(document.getElementById('album-detail-cover'), album.coverData || '', 'album');
-    this.renderAlbumTracks(albumId);
+    this.renderAlbumTracks(albumId, albums);
     document.getElementById('btn-play-album').onclick = () => {
       const tracks = this.getVisibleAlbumTracks(albumId);
       const isCurrentAlbum = this.state.currentTrackId
@@ -4616,7 +4609,9 @@ class App {
     };
     this.updatePlaylistPlayButton();
     this.switchView('album-detail');
+    document.getElementById('album-related-list').scrollLeft = 0;
     setTimeout(() => this.safeApplyMarquee(), 30);
+    return true;
   }
 
   getVisibleAlbumTracks(albumId) {
@@ -4625,13 +4620,13 @@ class App {
     return [...album.tracks];
   }
 
-  renderAlbumTracks(albumId) {
-    const album = this.getAlbumGroups().find(item => item.id === albumId);
+  renderAlbumTracks(albumId, albums = this.getAlbumGroups()) {
+    const album = albums.find(item => item.id === albumId);
     const container = document.getElementById('album-tracks-container');
     if (!container) return;
-    const tracks = this.getVisibleAlbumTracks(albumId);
-    const title = document.getElementById('album-detail-sub');
-    if (title) title.textContent = `${tracks.length}곡 • ${formatTotalTime(tracks)}`;
+    const tracks = album?.tracks || [];
+    const duration = formatTotalTime(tracks, { includeSeconds: true });
+    document.getElementById('album-track-summary').textContent = `곡 ${tracks.length}개 · ${duration}`;
     container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>검색 결과가 없습니다.</p></div>';
     tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'album', id: albumId, name: album?.name || track.album || '' })));
     if (album) {
@@ -4639,7 +4634,33 @@ class App {
       document.getElementById('album-detail-title').textContent = album.name;
       document.getElementById('album-detail-artist').textContent = album.artist || '알 수 없는 아티스트';
     }
+    this.renderRelatedAlbums(album, albums);
     setTimeout(() => this.safeApplyMarquee(), 30);
+  }
+
+  renderRelatedAlbums(album, albums) {
+    const section = document.getElementById('album-related');
+    const list = document.getElementById('album-related-list');
+    const artist = album?.artist.toLocaleLowerCase();
+    const related = album ? albums.filter(item => item.id !== album.id && item.artist.toLocaleLowerCase() === artist) : [];
+    related.sort((a, b) => b.addedAt - a.addedAt || a.name.localeCompare(b.name, 'ko'));
+    section.hidden = !related.length;
+    document.getElementById('album-related-title').textContent = related.length ? `${album.artist}의 곡 더 보기` : '';
+    const cards = document.createDocumentFragment();
+    for (const item of related) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'media-card clickable';
+      button.innerHTML = `
+        <span class="media-card-art"></span>
+        <span class="track-title-viewport home-media-title"><span class="title marquee-content">${escapeHtml(item.name)}</span></span>
+        <span class="track-artist-viewport home-media-title"><span class="subtitle marquee-content">${escapeHtml(item.artist)}</span></span>
+      `;
+      this.setCoverElement(button.querySelector('.media-card-art'), item.coverData, 'album');
+      button.addEventListener('click', () => this.openAlbumDetail(item.id));
+      cards.appendChild(button);
+    }
+    list.replaceChildren(cards);
   }
 
   openFolderDetail(folderName) {
@@ -6732,7 +6753,6 @@ class App {
     }
     const miniProgress = String(progress / 100);
     document.getElementById('mini-progress-fill')?.style.setProperty('--mini-progress', miniProgress);
-    document.getElementById('mini-player')?.style.setProperty('--mini-progress', miniProgress);
 
     const artwork = this.getTrackArtworkData(track);
     this.setCoverElement(
@@ -6957,7 +6977,7 @@ class App {
   }
 
   safeApplyMarquee() {
-    if (this._marqueeFrame) return;
+    if (this._marqueeFrame || document.visibilityState === 'hidden') return;
     this._marqueeFrame = requestAnimationFrame(
       () => {
         this._marqueeFrame = 0;
@@ -6983,7 +7003,10 @@ class App {
             }
             // The mini player has separate title, separator and artist styles.
             const parts = content.children.length ? content.children : [content];
-            for (const part of parts) part.dataset.marqueeText = part.textContent.trim();
+            for (const part of parts) {
+              const text = part.textContent.trim();
+              if (part.dataset.marqueeText !== text) part.dataset.marqueeText = text;
+            }
             content.style.removeProperty('transform');
             content.classList.add('marquee-anim');
           } else {
@@ -7050,6 +7073,7 @@ document.addEventListener('visibilitychange', () => {
   const app = window.app;
   if (!app) return;
   app.player.setVisible(document.visibilityState === 'visible');
+  if (document.visibilityState === 'visible') app.safeApplyMarquee();
   if (!app.state?.currentTrackId) return;
 
   if (document.visibilityState === 'hidden') {
@@ -7075,6 +7099,9 @@ window.addEventListener(
   () => {
     app = new App();
     window.app = app;
-    app.init();
+    app.init().catch(error => {
+      console.error('[AuraSound] 보관함 열기 실패', error);
+      alert('보관함을 열지 못했습니다. 앱 데이터와 음악 파일을 그대로 두고 앱을 다시 열어 주세요.');
+    });
   }
 );

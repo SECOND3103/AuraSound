@@ -20,7 +20,7 @@ export function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-export function formatTotalTime(tracks) {
+export function formatTotalTime(tracks, { includeSeconds = false } = {}) {
   const totalSec = tracks.reduce((total, track) => total + (track.duration || 0), 0);
   if (totalSec === 0) return '0분 0초';
 
@@ -28,7 +28,7 @@ export function formatTotalTime(tracks) {
   const minutes = Math.floor((totalSec % 3600) / 60);
   const seconds = Math.floor(totalSec % 60);
 
-  if (hours > 0) return `${hours}시간 ${minutes}분`;
+  if (hours > 0) return `${hours}시간 ${minutes}분${includeSeconds ? ` ${seconds}초` : ''}`;
   return `${minutes}분 ${seconds}초`;
 }
 

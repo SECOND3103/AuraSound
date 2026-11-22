@@ -37,11 +37,12 @@ function loadApp(overrides = {}) {
     ...overrides.globals
   });
   for (const [path, name] of [
+    ['www/js/backup-progress.js', 'BackupProgress'],
     ['www/js/storage.js', 'StorageManager'],
     ['www/js/audio-player.js', 'AudioPlayer'],
     ['www/js/native-storage.js', 'NativeMusicStorage']
   ]) {
-    vm.runInContext(read(path).replace('export class ', 'class ') + `\nglobalThis.${name} = ${name};`, context);
+    vm.runInContext(read(path).replace(/^import .*;$/gm, '').replace('export class ', 'class ') + `\nglobalThis.${name} = ${name};`, context);
   }
   vm.runInContext(read('www/js/utils.js').replace(/export function /g, 'function '), context);
   const source = overrides.source || read('www/js/app.js');
@@ -298,6 +299,76 @@ test('native duration reads metadata without copying music into the WebView', as
   assert.equal(reads, 3);
 });
 
+test('filtered multi-selection saves large audio files once, even when duration is unavailable', async () => {
+  const handlers = {};
+  const list = { addEventListener: (name, listener) => { handlers[name] = listener; } };
+  const confirm = {};
+  const elements = {
+    'pending-list-container': list,
+    'pending-search-input': { addEventListener: (name, listener) => { handlers[name] = listener; } },
+    'btn-modal-confirm': confirm,
+    'btn-modal-cancel': {},
+    'modal-body': { replaceChildren() {} },
+    'modal-overlay': { classList: { remove() {} } }
+  };
+  const { app, window } = loadApp({
+    document: { getElementById: id => elements[id] },
+    globals: { btoa, alert: message => assert.fail(message) }
+  });
+  const copied = new Map();
+  let current;
+  window.AuraSoundNative = {
+    beginImport: id => { current = id; copied.set(id, 0); return 'Music/' + id; },
+    appendImport(base64) {
+      const size = Buffer.from(base64, 'base64').length;
+      assert.ok(size <= 256 * 1024);
+      copied.set(current, copied.get(current) + size);
+      return true;
+    },
+    finishImport: () => true,
+    getMusicDuration: () => 0
+  };
+  const sizes = [4_830_000, 3_920_000, 12];
+  const files = sizes.map((size, i) => new File([new Uint8Array(size)], `Track ${i}.mp3`, { type: 'audio/mpeg' }));
+  const realOpen = app.openAddMusicModal.bind(app);
+  let tracks;
+  app.openAddMusicModal = pending => { tracks = pending; realOpen(pending); };
+  app.showModal = (_title, _body, callback) => { confirm.onclick = callback; };
+  app.renderAll = app.updateSettingsUI = () => {};
+  app.storage.saveTrack = async track => {
+    assert.equal(track.fileBlob, undefined);
+    assert.equal(track._checked, undefined);
+  };
+  app.handleFileImport({ target: { files, value: 'selected' } });
+  handlers.change({ target: { value: tracks[2].id, checked: false } });
+  handlers.input({ target: { value: 'Track 0' } });
+  assert.match(list.innerHTML, /Track 0/);
+  assert.doesNotMatch(list.innerHTML, /Track 1/);
+  const confirmImport = confirm.onclick;
+  await Promise.all([confirmImport(), confirmImport()]);
+  assert.deepEqual(Array.from(app.state.tracks, track => track.id), [tracks[0].id, tracks[1].id]);
+  assert.deepEqual([...copied.values()], sizes.slice(0, 2));
+});
+
+test('storage failure removes the unregistered file and permits saving the next track', async () => {
+  const { app, window } = loadApp({ globals: { btoa } });
+  const deleted = [];
+  window.AuraSoundNative = {
+    beginImport: id => 'Music/' + id,
+    appendImport: () => true,
+    finishImport: () => true,
+    deleteMusicFile(path) { deleted.push(path); return true; }
+  };
+  app.storage.saveTrack = async track => {
+    if (track.id === 'failed') throw new Error('Storage failure');
+  };
+  const fileBlob = new File(['audio data'], 'track.mp3');
+  await assert.rejects(app.saveSelectedMusic({ id: 'failed', fileBlob }), /Storage failure/);
+  await app.saveSelectedMusic({ id: 'saved', fileBlob });
+  assert.deepEqual(deleted, ['Music/failed']);
+  assert.deepEqual(Array.from(app.state.tracks, track => track.id), ['saved']);
+});
+
 test('file info releases its audio context on successful and failed decoding', async () => {
   for (const fail of [false, true]) {
     let closed = 0;
@@ -402,6 +473,243 @@ test('bulk metadata writes omit blobs and settle only after transaction commit',
   transactions[0].oncomplete();
   await promise;
   assert.equal(completed, true);
+});
+
+function androidLibraryFixture() {
+  const stores = { tracks: new Map(), playlists: new Map(), appState: new Map() };
+  let initialized = false;
+  const catalog = {
+    isInitialized: () => initialized,
+    finishMigration() { initialized = true; },
+    keys: store => JSON.stringify([...stores[store].keys()]),
+    readRecord: (store, id) => stores[store].get(id) ?? null,
+    putRecords(store, json) {
+      for (const row of JSON.parse(json)) stores[store].set(row.id ?? row.key, JSON.stringify(row));
+    },
+    removeRecord(store, id) { stores[store].delete(id); },
+    clearRecords() { for (const records of Object.values(stores)) records.clear(); }
+  };
+  const names = ['0001_track_123_abcde_song.mp3', 'track_123_abcde_song.mp3', 'track_456_fghij_Artist - Title.flac'];
+  const files = {
+    listMusicFiles: () => JSON.stringify(names),
+    describeMusicFile: name => JSON.stringify(name.endsWith('.mp3') ? { title: 'Embedded title' } : {})
+  };
+  function launch(legacy = {}) {
+    const { app, window } = loadApp();
+    window.AuraSoundLibrary = catalog;
+    window.AuraSoundNative = files;
+    app.storage.openWebDatabase = async () => {};
+    app.storage.runTransaction = async ([store]) => legacy[store] || [];
+    return app;
+  }
+  return { catalog, files, names, launch };
+}
+
+test('empty Android web database recovers original and ZIP filenames once and exports their audio paths', async () => {
+  const { launch, files } = androidLibraryFixture();
+  const app = launch({ appState: [{ key: 'theme', value: 'dark' }] });
+  await app.storage.init();
+  const tracks = JSON.parse(JSON.stringify(await app.storage.getAllTracks()));
+  assert.deepEqual(tracks.map(t => [t.id, t.filePath, t.title]), [
+    ['track_123_abcde', 'Music/track_123_abcde_song.mp3', 'Embedded title'],
+    ['track_456_fghij', 'Music/track_456_fghij_Artist - Title.flac', 'Title']
+  ]);
+  assert.equal(tracks[1].artist, 'Artist');
+  let exported;
+  files.beginImport = () => { throw new Error('unexpected file copy'); };
+  files.exportBackup = json => { exported = JSON.parse(json); };
+  await app.exportBackup();
+  assert.deepEqual(exported.tracks.map(t => t.filePath), tracks.map(t => t.filePath));
+  const reopened = launch().storage;
+  await reopened.init();
+  assert.equal((await reopened.getAllTracks()).length, 2);
+});
+
+test('a good backup reconnects its playlist to recovered tracks and restores edited metadata', async () => {
+  const { launch } = androidLibraryFixture();
+  const app = launch();
+  await app.storage.init();
+  app.state.tracks = await app.storage.getAllTracks();
+  const recovered = app.state.tracks[0];
+  app.renderAll = app.updateSettingsUI = app.backupProgress.showImportSummary = () => {};
+  const playlist = { id: 'original', name: 'Previous name', trackIds: [app.state.tracks[1].id, recovered.id] };
+  await app.handleBackupResult('imported', JSON.stringify({
+    tracks: [{ id: recovered.id, title: 'Custom title', filePath: recovered.filePath }],
+    playlists: [playlist]
+  }));
+  const tracks = await app.storage.getAllTracks();
+  assert.equal(tracks.length, 2);
+  assert.equal(tracks[0].title, 'Custom title');
+  assert.equal(tracks[0].recoveredFromFile, undefined);
+  assert.deepEqual(Array.from((await app.storage.getAllPlaylists())[0].trackIds), playlist.trackIds);
+});
+
+test('a backup restores the custom cover and order for the correct album when titles match', async () => {
+  const { app, window, local } = loadApp();
+  const { app: restored, local: restoredLocal } = loadApp();
+  const title = '첫 앨범';
+  const customCover = 'data:image/jpeg;base64,Y292ZXI=';
+  const ownAlbum = JSON.stringify([title, '가수']);
+  const otherAlbum = JSON.stringify([title, '다른 가수']);
+  const tracks = [
+    { id: 'a', album: title, artist: '가수', artworkData: 'embedded' },
+    { id: 'b', album: title, artist: '가수' },
+    { id: 'c', album: title, artist: '다른 가수', artworkData: 'other-embedded' }
+  ];
+  local.set('auraAlbumCovers', JSON.stringify({ [ownAlbum]: customCover }));
+  local.set('auraAlbumTrackOrder', JSON.stringify({ [ownAlbum]: ['b', 'a'] }));
+  restoredLocal.set('auraAlbumCovers', JSON.stringify({ [otherAlbum]: 'other-custom' }));
+  app.storage.getAllTracks = async () => tracks;
+  app.storage.getAllPlaylists = app.storage.getAllState = async () => [];
+  let payload;
+  window.AuraSoundNative = {
+    beginImport() {},
+    exportBackup(json) { payload = json; }
+  };
+  restored.storage.saveTrack = async () => {};
+  restored.renderAll = restored.updateSettingsUI = restored.backupProgress.showImportSummary = () => {};
+
+  await app.exportBackup();
+  await restored.handleBackupResult('imported', payload);
+  const albums = new Map(restored.getAlbumGroups().map(album => [album.id, album]));
+  assert.equal(albums.get(ownAlbum).coverData, customCover);
+  assert.deepEqual(Array.from(albums.get(ownAlbum).tracks, track => track.id), ['b', 'a']);
+  assert.equal(albums.get(otherAlbum).coverData, 'other-custom');
+  assert.equal(restored.getTrackArtworkData(tracks[0]), customCover);
+
+  // A legacy backup contains no album overrides.
+  await restored.handleBackupResult('imported', '{"albumCovers":{},"albumTrackOrder":{}}');
+  assert.equal(restored.getTrackArtworkData(tracks[0]), customCover);
+});
+
+test('rapid export taps open one Android picker and cancelling allows another export', async () => {
+  const { app, window } = loadApp();
+  let pickers = 0;
+  window.AuraSoundNative = {
+    beginImport() {},
+    exportBackup(json) {
+      assert.equal(JSON.parse(json).tracks[0].id, 'song');
+      pickers++;
+    }
+  };
+  app.storage.getAllTracks = async () => [{ id: 'song' }];
+  app.storage.getAllPlaylists = app.storage.getAllState = async () => [];
+
+  await Promise.all([app.exportBackup(), app.exportBackup()]);
+  assert.equal(pickers, 1);
+  await app.handleBackupResult('cancel', '');
+  await app.exportBackup();
+  assert.equal(pickers, 2);
+});
+
+test('an artist cover storage error preserves the completed backup result and continues restoring settings', async () => {
+  const local = new Map([['auraArtistCovers', '{"Existing":"cover"}']]);
+  const { app } = loadApp({ globals: {
+    console: { warn() {}, error(error) { assert.fail(error); } },
+    localStorage: {
+      getItem: key => local.get(key) ?? null,
+      setItem(key, value) {
+        if (key === 'auraArtistCovers') throw new Error('Storage quota exceeded');
+        local.set(key, value);
+      }
+    }
+  } });
+  let savedTrack;
+  let savedPlaylist;
+  const settings = new Map();
+  app.storage.saveTrack = async track => { savedTrack = track; };
+  app.storage.savePlaylist = async playlist => { savedPlaylist = playlist; };
+  app.storage.getStateKey = async key => settings.get(key);
+  app.storage.saveStateKey = async (key, value) => { settings.set(key, value); };
+  app.renderAll = app.updateSettingsUI = () => {};
+  let summary;
+  app.backupProgress.showImportSummary = (...args) => { summary = args; };
+
+  await app.handleBackupResult('imported', JSON.stringify({
+    tracks: [{ id: 'track' }],
+    playlists: [{ id: 'playlist', trackIds: ['track'] }],
+    artistCovers: { Imported: 'cover' },
+    appState: [{ key: 'volume', value: 0 }]
+  }));
+
+  assert.equal(savedTrack.id, 'track');
+  assert.deepEqual(Array.from(savedPlaylist.trackIds), ['track']);
+  assert.equal(settings.get('volume'), 0);
+  assert.equal(local.get('auraArtistCovers'), '{"Existing":"cover"}');
+  assert.deepEqual(summary.slice(1, 3), [1, 1]);
+  assert.match(summary[3].join(' '), /아티스트 커버/);
+});
+
+test('invalid existing cover data and a screen refresh error do not report a failed backup', async () => {
+  const { app, local } = loadApp({ globals: {
+    console: { warn() {}, error(error) { assert.fail(error); } }
+  } });
+  local.set('auraArtistCovers', '{invalid');
+  app.renderAll = () => { throw new Error('Screen refresh failed'); };
+  let warnings;
+  app.backupProgress.showImportSummary = (_results, _tracks, _playlists, messages) => { warnings = messages; };
+
+  await app.handleBackupResult('imported', JSON.stringify({ artistCovers: { Imported: 'cover' } }));
+
+  assert.equal(local.get('auraArtistCovers'), '{"Imported":"cover"}');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /화면을 갱신하지 못했습니다/);
+});
+
+test('interrupted Android migration retries and preserves later playlist edits after WebView storage loss', async () => {
+  const { launch, catalog, files } = androidLibraryFixture();
+  const id = 'track_123_abcde';
+  const legacy = {
+    tracks: [{ id, title: 'Edited title', filePath: 'Music/track_123_abcde_song.mp3' }],
+    playlists: [{ id: 'p', name: 'My playlist', trackIds: [id, id] }],
+    appState: [{ key: 'volume', value: 0 }]
+  };
+  const read = files.describeMusicFile;
+  files.describeMusicFile = () => { throw new Error('interruption'); };
+  await assert.rejects(launch(legacy).storage.init(), /interruption/);
+  assert.equal(catalog.isInitialized(), false);
+  files.describeMusicFile = read;
+  const { storage } = launch(legacy);
+  await storage.init();
+  assert.equal((await storage.getAllTracks())[0].title, 'Edited title');
+  const [playlist] = await storage.getAllPlaylists();
+  assert.deepEqual(Array.from(playlist.trackIds), [id, id]);
+  playlist.trackIds.unshift('track_456_fghij');
+  await storage.savePlaylist(playlist);
+  const next = launch().storage;
+  next.openWebDatabase = async () => { throw new Error('web database unavailable'); };
+  await next.init();
+  assert.deepEqual(Array.from((await next.getAllPlaylists())[0].trackIds), ['track_456_fghij', id, id]);
+  assert.equal(await next.getStateKey('volume'), 0);
+  assert.equal((await next.getAllTracks()).length, 2);
+});
+
+test('an intentional Android reset does not reimport stale web records and an empty export cannot mask remaining files', async () => {
+  const { launch, files, names } = androidLibraryFixture();
+  const legacy = { playlists: [{ id: 'old', trackIds: [] }] };
+  const { storage } = launch(legacy);
+  await storage.init();
+  await storage.clearAll();
+  names.length = 0;
+  const app = launch(legacy);
+  await app.storage.init();
+  assert.equal((await app.storage.getAllPlaylists()).length, 0);
+  names.push('track_123_abcde_song.mp3');
+  let warned = false;
+  let exported = false;
+  files.beginImport = () => {};
+  files.exportBackup = () => { exported = true; };
+  // Native alerts normally open a DOM dialog. Observe the message in isolation.
+  const { app: exporter, window } = loadApp({ globals: { alert: () => { warned = true; } } });
+  window.AuraSoundNative = files;
+  exporter.storage = app.storage;
+  await exporter.exportBackup();
+  assert.equal(exported, false);
+  assert.equal(warned, true);
+  const next = launch(legacy).storage;
+  await next.init();
+  assert.equal((await next.getAllTracks())[0].id, 'track_123_abcde');
+  assert.equal((await next.getAllPlaylists()).length, 0);
 });
 
 test('read errors and aborted writes reject instead of leaving callers waiting', async () => {
