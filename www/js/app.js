@@ -63,8 +63,43 @@ window.__auraSoundNativeAction = function(action, value) {
   }
 };
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.4';
 const SPLIT_PLAYER_QUERY = '(min-width: 840px)';
+const TOUCH_DRAG_SLOP = 12;
+const ALBUM_RELEASE_PREFIX = 'albumRelease:';
+const ALBUM_COLLECTION_PREFIX = 'albumCollection:';
+const ALBUM_TYPES = new Map([['album', '앨범'], ['ep', 'EP'], ['single', '싱글'], ['compilation', '컴필레이션']]);
+
+function albumReleaseInfo(value) {
+  const type = ALBUM_TYPES.has(value?.type) ? value.type : '';
+  const date = typeof value?.date === 'string' ? value.date : '';
+  const parsed = /^(?!0000)\d{4}-\d{2}-\d{2}$/.test(date) && new Date(date + 'T00:00:00Z');
+  const validDate = parsed && Number.isFinite(parsed.getTime()) && parsed.toISOString().startsWith(date);
+  return { type, date: validDate ? date : '' };
+}
+
+function smoothProgress(value) {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
+}
+
+function albumTagId(track) {
+  const name = track?.album?.trim();
+  if (!name || name.toLowerCase() === 'local file') return '';
+  const artist = track.artist?.trim() || 'Unknown Artist';
+  return JSON.stringify([name.toLocaleLowerCase(), artist.toLocaleLowerCase()]);
+}
+
+function readAlbumCollection(value) {
+  if (value?.deleted === true) return { deleted: true, trackIds: [] };
+  if (typeof value?.name !== 'string' || !value.name.trim() || !Array.isArray(value.trackIds)) return null;
+  return {
+    name: value.name.trim(),
+    artist: typeof value.artist === 'string' ? value.artist.trim() : '',
+    trackIds: [...new Set(value.trackIds.filter(id => typeof id === 'string' && id))],
+    createdAt: Number(value.createdAt) || 0
+  };
+}
 
 import { BackupProgress } from './backup-progress.js';
 import { StorageManager } from './storage.js';
@@ -157,6 +192,8 @@ class App {
     this.coverIconObserved = new WeakSet();
     this.lastPlaybackPositionPersistAt = 0;
     this.localStorageObjectCache = new Map();
+    this.albumReleases = new Map();
+    this.albumCollections = new Map();
 
     this.state = {
       tracks: [],
@@ -239,6 +276,13 @@ class App {
     await this.ensureTrackDurations();
 
     const savedState = new Map((await this.storage.getAllState()).map(entry => [entry.key, entry.value]));
+    for (const [key, value] of savedState) {
+      if (key.startsWith(ALBUM_RELEASE_PREFIX)) this.albumReleases.set(key.slice(ALBUM_RELEASE_PREFIX.length), albumReleaseInfo(value));
+      if (key.startsWith(ALBUM_COLLECTION_PREFIX)) {
+        const record = readAlbumCollection(value);
+        if (record) this.albumCollections.set(key.slice(ALBUM_COLLECTION_PREFIX.length), record);
+      }
+    }
     const getSavedState = key => savedState.has(key) ? savedState.get(key) : null;
 
     this.setTheme(getSavedState('theme'));
@@ -293,9 +337,6 @@ class App {
     this.bindEvents();
     this.setupMarqueeObserver();
     this.setupSwipeDismissals();
-
-    this.renderAll();
-    this.updateSettingsUI();
 
     const lastTrackId =
       getSavedState('lastTrackId');
@@ -363,6 +404,8 @@ class App {
         this.updateMediaSession(track);
       }
     }
+    this.renderAll();
+    this.updateSettingsUI();
   }
 
   async persistPlaybackPosition(position = this.player.getCurrentTime()) {
@@ -400,8 +443,8 @@ class App {
         trackId: track.id,
         title: track.title || 'AuraSound',
         artist: track.artist || '',
-        album: track.album || '',
-        artworkData: this.getTrackArtworkData(track, artworkLookup),
+        album: this.trackAlbumName(track, this.state.playbackContext),
+        artworkData: this.getTrackArtworkData(track, artworkLookup, this.state.playbackContext),
         filePath: track.filePath || ''
       })),
       index: nativeIndex,
@@ -484,12 +527,14 @@ class App {
     });
     document.getElementById('btn-settings-back')?.addEventListener('click', () => this.backFromSettings());
     document.getElementById('btn-nav-create')?.addEventListener('click', () => this.toggleCreateMenu());
+    const libraryActions = document.querySelector('#library-add-sheet-overlay .sheet-menu-list');
+    for (const button of document.querySelectorAll('#create-sheet-overlay .create-menu-item')) {
+      const option = button.cloneNode(true);
+      option.id = button.id.replace('btn-create-', 'btn-library-add-');
+      libraryActions.appendChild(option);
+    }
     document.getElementById('btn-library-add')?.addEventListener('click', () => {
-      const overlay = document.getElementById('library-add-sheet-overlay');
-      overlay.classList.add('active');
-      const sheet = overlay.querySelector('.bottom-sheet');
-      sheet.classList.add('is-opening');
-      window.setTimeout(() => sheet.classList.remove('is-opening'), 320);
+      document.getElementById('library-add-sheet-overlay').classList.add('active');
     });
     for (const [prefix, close, duration] of [
       ['btn-create-', () => this.closeCreateMenu(), 220],
@@ -503,6 +548,10 @@ class App {
         close();
         document.getElementById('audio-file-input')?.click();
       });
+      document.getElementById(prefix + 'album')?.addEventListener('click', () => {
+        close();
+        window.setTimeout(() => this.openCreateAlbumModal(), duration);
+      });
       document.getElementById(prefix + 'import')?.addEventListener('click', () => {
         close();
         this.importBackup();
@@ -510,7 +559,7 @@ class App {
     }
     this.bindProfileDrawerGestures();
 
-    document.querySelectorAll('.view .btn-back').forEach(button => {
+    document.querySelectorAll('.view .btn-back, .detail-navigation .btn-back').forEach(button => {
       button.addEventListener('click', () => this.navigateBackFromDetail());
     });
 
@@ -885,24 +934,24 @@ class App {
 
 
 
-    document
-      .querySelectorAll(
-        '.bottom-sheet-overlay, .modal-overlay'
-      )
-      .forEach(el => {
-        el.addEventListener(
-          'click',
-          e => {
-            if (e.target === el) {
-              if (el.classList.contains('bottom-sheet-overlay')) {
-                this.closeOverlayWithAnimation(el.id);
-              } else if (!this.musicImportInProgress) {
-                el.classList.remove('active');
-              }
-            }
-          }
-        );
+    document.querySelectorAll('.bottom-sheet-overlay').forEach(overlay => {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'sheet-backdrop';
+      backdrop.setAttribute('aria-hidden', 'true');
+      overlay.prepend(backdrop);
+      backdrop.addEventListener('pointerdown', event => {
+        if (event.isPrimary && event.button === 0) backdrop.setPointerCapture(event.pointerId);
       });
+      backdrop.addEventListener('pointerup', event => {
+        if (backdrop.hasPointerCapture(event.pointerId)) this.closeOverlayWithAnimation(overlay.id);
+      });
+      backdrop.addEventListener('click', () => this.closeOverlayWithAnimation(overlay.id));
+    });
+    document.getElementById('modal-overlay').addEventListener('click', event => {
+      if (event.target === event.currentTarget && !this.musicImportInProgress) {
+        event.currentTarget.classList.remove('active');
+      }
+    });
 
     document.addEventListener(
       'keydown',
@@ -1247,7 +1296,17 @@ class App {
       if (typeof item?.key !== 'string' || !item.key || !Object.hasOwn(item, 'value')) continue;
       try {
         const exists = await this.storage.getStateKey(item.key);
-        if (exists == null) await this.storage.saveStateKey(item.key, item.value);
+        if (item.key.startsWith(ALBUM_RELEASE_PREFIX)) {
+          const release = albumReleaseInfo(exists ?? item.value);
+          if (exists == null) await this.storage.saveStateKey(item.key, release);
+          this.albumReleases.set(item.key.slice(ALBUM_RELEASE_PREFIX.length), release);
+        } else if (item.key.startsWith(ALBUM_COLLECTION_PREFIX)) {
+          const record = readAlbumCollection(exists ?? item.value);
+          if (!record) continue;
+          if (exists == null) await this.storage.saveStateKey(item.key, record);
+          this.albumCollections.set(item.key.slice(ALBUM_COLLECTION_PREFIX.length), record);
+          this._assignedAlbums = null;
+        } else if (exists == null) await this.storage.saveStateKey(item.key, item.value);
       } catch (error) {
         console.warn('[AuraSound Backup] 설정 복원 실패:', item.key, error);
         settingsFailed = true;
@@ -1683,6 +1742,12 @@ class App {
         t => t.id !== id
       );
 
+    for (const [albumId, album] of this.albumCollections) {
+      if (album.trackIds.includes(id)) {
+        await this.saveAlbumCollection(albumId, { ...album, trackIds: album.trackIds.filter(trackId => trackId !== id) });
+      }
+    }
+
     for (
       const playlist of this.state.playlists
     ) {
@@ -1825,8 +1890,8 @@ class App {
     const saturation = peak ? 1 - Math.min(...rgb) / peak : 0;
     // Keep muted artwork muted. Increase the contrast of stronger accent colors gradually.
     const intensity = Math.max(0, Math.min(1, (saturation - .42) / .12));
-    const gain = Math.min(1 / (saturation || 1), 1 + .16 * intensity);
-    const ceiling = 84 - 9 * intensity;
+    const gain = Math.min(1 / (saturation || 1), 1 + .10 * intensity);
+    const ceiling = 84 + 8 * intensity;
     const scale = ceiling / Math.max(ceiling, peak);
     const background = rgb.map(value => Math.round((peak - (peak - value) * gain) * scale));
     style.setProperty('--mini-cover-color', 'rgb(' + background.join(',') + ')');
@@ -1946,40 +2011,42 @@ class App {
   }
 
   buildArtworkLookup() {
-    const artworkByAlbum = new Map();
-    this.state.tracks.forEach(item => {
-      if (!item?.artworkData) return;
-      const albumName = (item.album || '').trim();
-      if (!albumName || albumName.toLowerCase() === 'local file') return;
-      const artist = (item.artist || 'Unknown Artist').trim() || 'Unknown Artist';
-      const albumId = JSON.stringify([albumName.toLocaleLowerCase(), artist.toLocaleLowerCase()]);
-      if (!artworkByAlbum.has(albumId)) artworkByAlbum.set(albumId, item.artworkData);
-    });
-    return {
-      artworkByAlbum,
-      albumCovers: this.getStoredAlbumCovers()
-    };
+    const covers = new Map(Object.entries(this.getStoredAlbumCovers()).filter(([, cover]) => cover));
+    for (const track of this.state.tracks) {
+      if (!track.artworkData) continue;
+      const id = albumTagId(track);
+      if (id && !covers.has(id) && !this.albumCollections.has(id)) covers.set(id, track.artworkData);
+    }
+    for (const [id, record] of this.albumCollections) {
+      if (covers.has(id)) continue;
+      for (const trackId of record.trackIds) {
+        const embedded = this.getTrackById(trackId)?.artworkData;
+        if (embedded) {
+          covers.set(id, embedded);
+          break;
+        }
+      }
+    }
+    return covers;
   }
 
-  getTrackArtworkData(track, artworkLookup = null) {
+  getTrackArtworkData(track, artworkLookup = null, context = null) {
     if (!track) return '';
-    if (track.coverFollowsAlbum !== false) {
-      const albumName = (track.album || '').trim();
-      if (!albumName || albumName.toLowerCase() === 'local file') return '';
-      const artist = (track.artist || 'Unknown Artist').trim() || 'Unknown Artist';
-      const albumId = JSON.stringify([albumName.toLocaleLowerCase(), artist.toLocaleLowerCase()]);
-      const albumCovers = artworkLookup ? artworkLookup.albumCovers : this.getStoredAlbumCovers();
-      const albumCover = albumCovers[albumId];
-      if (albumCover) return albumCover;
-      if (artworkLookup) return artworkLookup.artworkByAlbum.get(albumId) || '';
-      const matchingTrack = this.state.tracks.find(item =>
-        (item.album || '').trim().toLocaleLowerCase() === albumName.toLocaleLowerCase()
-        && ((item.artist || 'Unknown Artist').trim() || 'Unknown Artist').toLocaleLowerCase() === artist.toLocaleLowerCase()
-        && !!item.artworkData
-      );
-      return matchingTrack?.artworkData || '';
+    if (track.coverFollowsAlbum === false) return track.customCoverData || '';
+    const id = this.albumIdForTrack(track, context);
+    if (!id) return this.albumCollections.get(albumTagId(track))?.deleted ? track.artworkData || '' : '';
+    if (artworkLookup) return artworkLookup.get(id) || '';
+    const cover = this.getStoredAlbumCovers()[id];
+    if (cover) return cover;
+    const collection = this.albumCollections.get(id);
+    if (collection) {
+      for (const trackId of collection.trackIds) {
+        const embedded = this.getTrackById(trackId)?.artworkData;
+        if (embedded) return embedded;
+      }
+      return '';
     }
-    return track.customCoverData || '';
+    return this.state.tracks.find(item => item.artworkData && albumTagId(item) === id)?.artworkData || '';
   }
 
   createCoverFilePickerMarkup(inputId) {
@@ -1993,7 +2060,7 @@ class App {
       </div>`;
   }
 
-  async prepareCoverSource(file) {
+  async prepareCoverSource(file, maxDimension = 1200) {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error('이미지 파일을 읽지 못했습니다.'));
@@ -2001,7 +2068,6 @@ class App {
       reader.readAsDataURL(file);
     });
     const image = await this.loadCoverImage(dataUrl);
-    const maxDimension = 1200;
     const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
@@ -2009,7 +2075,7 @@ class App {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('이미지 조절을 지원하지 않습니다.');
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.84);
+    return canvas.toDataURL('image/jpeg', maxDimension > 1200 ? 0.92 : 0.84);
   }
 
   loadCoverImage(dataUrl) {
@@ -2025,7 +2091,7 @@ class App {
     const {
       title, inputId, previewId, icon = 'music_note', cropShape = 'square', currentData = '',
       sourceDataFallback = currentData, sourceKey, extraHTML = '',
-      followCheckboxId = '', followAlbumPreviewData = '', onSave, afterSave
+      followCheckboxId = '', followAlbumPreviewData = '', onSave, afterSave, largeArtwork = false
     } = options;
     let sourceRecord = null;
     try { sourceRecord = await this.storage.getCoverSource(sourceKey); } catch (_) {}
@@ -2053,7 +2119,14 @@ class App {
       const followsAlbum = followCheckboxId && document.getElementById(followCheckboxId)?.checked;
       if (!sourceData && !followsAlbum) { alert('먼저 사진 파일을 선택해주세요.'); return; }
       if (sourceData && !sourceImage) { sourceImage = await this.loadCoverImage(sourceData).catch(() => null); }
-      if (sourceImage) cropData = this.renderCoverCrop(sourceImage, settings, document.getElementById(`${inputId}-crop-canvas`), true);
+      if (sourceImage) {
+        if (largeArtwork) {
+          // Keep the backup and thumbnail payload bounded while retaining a larger source for the banner.
+          cropData = this.renderArtistCover(sourceImage, settings, 768, 88_000);
+        } else {
+          cropData = this.renderCoverCrop(sourceImage, settings, document.getElementById(`${inputId}-crop-canvas`), true);
+        }
+      }
       try {
         await onSave({ cropData, sourceData, settings, followsAlbum });
         if (sourceData && sourceKey) {
@@ -2097,7 +2170,7 @@ class App {
       const file = input.files?.[0];
       if (!file) return;
       try {
-        sourceData = await this.prepareCoverSource(file);
+        sourceData = await this.prepareCoverSource(file, largeArtwork ? 1800 : 1200);
         sourceImage = await this.loadCoverImage(sourceData);
         settings = { zoom: 1, x: 50, y: 50 };
         if (followCheckboxId) {
@@ -2201,6 +2274,18 @@ class App {
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image, sx, sy, side, side, 0, 0, canvas.width, canvas.height);
     return asDataUrl ? canvas.toDataURL('image/jpeg', 0.9) : '';
+  }
+
+  renderArtistCover(image, settings, maxSize, dataLimit = Infinity) {
+    const canvas = document.createElement('canvas');
+    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight) / Math.max(1, Number(settings.zoom) || 1);
+    let size = Math.max(1, Math.min(maxSize, Math.floor(sourceSize)));
+    for (;;) {
+      canvas.width = canvas.height = size;
+      const data = this.renderCoverCrop(image, settings, canvas, true);
+      if (data.length <= dataLimit || size <= 320) return data;
+      size = Math.max(320, Math.floor(size * .82));
+    }
   }
 
   addPlaylistCoverButton(playlist) {
@@ -2368,12 +2453,6 @@ class App {
 
         <input
           class="form-input"
-          id="edit-album"
-          value="${escapeHtml(first.album || '')}"
-          placeholder="앨범">
-
-        <input
-          class="form-input"
           id="edit-genre"
           value="${escapeHtml(first.genre || '')}"
           placeholder="장르">
@@ -2419,11 +2498,6 @@ class App {
           artist:
             document.getElementById(
               'edit-artist'
-            ).value.trim(),
-
-          album:
-            document.getElementById(
-              'edit-album'
             ).value.trim(),
 
           genre:
@@ -3176,7 +3250,10 @@ class App {
     );
   }
 
-  switchView(viewName) {
+  switchView(viewName, { restore } = {}) {
+    if (viewName === 'settings' && this.state.activeView !== 'settings') {
+      this.settingsReturnView = this.captureViewPosition();
+    }
     if (
       this.state.activeView !==
       viewName
@@ -3185,7 +3262,7 @@ class App {
         this.state.activeView;
     }
 
-    if (['home', 'library', 'settings'].includes(viewName) && this.state.activeView !== viewName) {
+    if (!restore && ['home', 'library'].includes(viewName) && this.state.activeView !== viewName) {
       this.state.detailBackStack = [];
       this.state.detailBackView = viewName;
     }
@@ -3217,6 +3294,7 @@ class App {
     const browseTitle = document.getElementById('browse-header-title');
     if (browseTitle) browseTitle.textContent = activeTab === 'library' ? '보관함' : '홈';
     document.getElementById('library-header-actions')?.classList.toggle('hidden', viewName !== 'library');
+    document.getElementById('library-header-filters')?.classList.toggle('hidden', viewName !== 'library');
 
     const view = document.getElementById(`view-${viewName}`);
     view?.classList.add('active');
@@ -3238,7 +3316,8 @@ class App {
       this.updateSettingsUI();
     }
 
-    this.scrollMainContentToTop();
+    if (restore) this.restoreViewPosition(restore);
+    else this.scrollMainContentToTop();
 
     setTimeout(() => this.safeApplyMarquee(), 30);
   }
@@ -3353,9 +3432,6 @@ class App {
   }
 
   closeCreateMenu() {
-    const button = document.getElementById('btn-nav-create');
-    button?.classList.remove('is-open');
-    button?.setAttribute('aria-label', '만들기 메뉴 열기');
     this.closeOverlayWithAnimation('create-sheet-overlay');
   }
 
@@ -3364,6 +3440,11 @@ class App {
     const sheet = overlay?.querySelector('.bottom-sheet');
     if (!overlay || !sheet) return;
     window.clearTimeout(this._createMenuTimer);
+    if (sheet.classList.contains('is-dismissing')) {
+      const { transform } = getComputedStyle(sheet);
+      sheet.style.setProperty('--sheet-entry-transform', transform);
+      sheet.classList.add('is-opening');
+    }
     sheet.classList.remove('is-dismissing');
     sheet.style.transform = '';
     sheet.style.opacity = '';
@@ -3371,8 +3452,6 @@ class App {
     document.getElementById('btn-nav-create')?.classList.add('is-open');
     document.getElementById('btn-nav-create')?.setAttribute('aria-label', '만들기 메뉴 닫기');
     overlay.classList.add('active');
-    sheet.classList.add('is-opening');
-    this._createMenuTimer = window.setTimeout(() => sheet.classList.remove('is-opening'), 340);
     this.sendNativeMessage('overlay', { open: true, type: 'create-sheet' });
   }
 
@@ -3389,12 +3468,14 @@ class App {
 
   setCollectionDetailView(view) {
     this._collectionDetail?.pendingArtworkLoad?.abort();
+    if (this._collectionDetail) this._collectionDetail.navigation.hidden = true;
     this._collectionDetail = null;
     const isDetail = Boolean(view?.classList.contains('collection-detail'));
     document.getElementById('app')?.classList.toggle('detail-view-open', isDetail);
     if (!isDetail) return;
 
-    const navigation = view.querySelector('.detail-navigation');
+    const navigation = document.querySelector(`[data-detail-view="${this.state.activeView}"]`);
+    navigation.hidden = false;
     navigation.querySelector('.detail-navigation-title').textContent = view.querySelector('h2').textContent;
     const search = view.querySelector('.detail-search-panel');
     if (search) search.querySelector('button').classList.toggle('hidden', !search.querySelector('input').value.trim());
@@ -3406,22 +3487,54 @@ class App {
       actions: navigation.querySelector('.detail-nav-right'),
       more: navigation.querySelector('.detail-more'),
       playAnchor: view.querySelector('.detail-play-slot, .playlist-action-btns .btn-primary-play'),
+      title: view.querySelector('.playlist-meta-info .track-title-viewport'),
       cover: view.querySelector('.playlist-detail-header')
     };
     this._collectionDetail = detail;
     this.updateCollectionDetailArtworkColor(detail);
+    if (detail.isArtist) void this.loadArtistBanner(detail, this.state.artistDetailId);
+  }
+
+  async loadArtistBanner(detail, artistName) {
+    const image = detail.artwork.querySelector('img');
+    if (!image || image.dataset.bannerResolution) return;
+    try {
+      const source = await this.storage.getCoverSource(`artist:${artistName}`);
+      if (!source?.sourceData || this._collectionDetail !== detail) return;
+      const original = await this.loadCoverImage(source.sourceData);
+      if (this._collectionDetail !== detail || image.parentElement !== detail.artwork) return;
+      const settings = source.settings || {};
+      // An imported backup can replace the cover while an older crop source remains on this device.
+      const savedCrop = image.getAttribute('src');
+      const preview = document.createElement('canvas');
+      preview.width = preview.height = 320;
+      if (savedCrop !== this.renderArtistCover(original, settings, 768, 88_000)
+        && savedCrop !== this.renderCoverCrop(original, settings, preview, true)) return;
+      const banner = await this.loadCoverImage(this.renderArtistCover(original, settings, 1200));
+      if (this._collectionDetail !== detail || image.parentElement !== detail.artwork || banner.naturalWidth <= image.naturalWidth) return;
+      banner.alt = '';
+      banner.dataset.bannerResolution = 'true';
+      image.replaceWith(banner);
+      this.updateCollectionDetailArtworkColor(detail);
+    } catch {
+      // The saved cover is still available when its editable source cannot be loaded.
+    }
   }
 
   updateCollectionDetailArtworkColor(detail) {
     detail.pendingArtworkLoad?.abort();
-    const { view, artwork } = detail;
+    const { view, artwork, navigation } = detail;
     view.style.removeProperty('--detail-artwork-color');
+    navigation.style.removeProperty('--detail-artwork-color');
     const image = artwork.querySelector('img');
     if (!image) return;
     const applyColor = () => {
       if (this._collectionDetail !== detail || image.parentElement !== artwork || !image.naturalWidth) return;
       const color = this.sampleArtworkColor(image);
-      if (color) view.style.setProperty('--detail-artwork-color', color);
+      if (color) {
+        view.style.setProperty('--detail-artwork-color', color);
+        navigation.style.setProperty('--detail-artwork-color', color);
+      }
     };
     if (image.complete) applyColor();
     else {
@@ -3432,30 +3545,50 @@ class App {
 
   updateCollectionDetailScroll() {
     if (!this._collectionDetail) return;
-    const { view, navigation, actions, more, playAnchor, cover, artwork, isArtist, searchAboveCover } = this._collectionDetail;
+    const { view, navigation, actions, more, playAnchor, cover, artwork, title, isArtist, searchAboveCover } = this._collectionDetail;
     const bar = navigation.getBoundingClientRect();
-    const destination = isArtist ? null : actions.getBoundingClientRect();
+    const destination = actions.getBoundingClientRect();
     const origin = playAnchor.getBoundingClientRect();
-    const hero = cover.getBoundingClientRect();
+    const hero = (isArtist ? view : cover).getBoundingClientRect();
+    const titleRect = title.firstElementChild.getBoundingClientRect();
+    const artworkHeight = Math.max(1, artwork.offsetHeight);
     const destinationY = bar.bottom;
     const remainingY = origin.top + origin.height / 2 - destinationY;
     const collapse = Math.max(0, Math.min(1, 1 - remainingY / 72));
     const heroOffset = Math.max(0, bar.top - hero.top);
-    view.style.setProperty('--detail-collapse', String(collapse));
+    const overlap = bar.bottom - titleRect.top;
+    const titleHeight = Math.max(1, titleRect.height);
+    const titleProgress = smoothProgress(overlap / titleHeight);
+    const titleCenter = titleRect.top + titleHeight / 2;
+    const barCenter = destination.top + destination.height / 2;
+    const titleOffset = Math.min(bar.height, Math.max(0, titleCenter - barCenter));
+    const pinDistance = artworkHeight * .32;
+    const released = Math.max(0, heroOffset - pinDistance);
+    const coverProgress = isArtist
+      ? smoothProgress(released / (artworkHeight - pinDistance))
+      : Math.min(1, heroOffset / (artworkHeight * .82));
+    // The album and artist buttons begin travelling on the first scroll pixel.
+    const travel = searchAboveCover ? collapse : Math.min(1, heroOffset / Math.max(1, remainingY + heroOffset));
+    navigation.style.setProperty('--detail-nav-travel', String(travel));
+    navigation.style.setProperty('--detail-collapse', String(collapse));
+    navigation.style.setProperty('--detail-bar-opacity', String(smoothProgress((overlap + 10) / (titleHeight + 10))));
+    navigation.style.setProperty('--detail-title-progress', String(titleProgress));
+    view.style.setProperty('--detail-title-progress', String(titleProgress));
+    navigation.style.setProperty('--detail-title-offset', `${titleOffset}px`);
+    view.style.setProperty('--detail-cover-progress', String(coverProgress));
     if (searchAboveCover) {
-      const artworkHeight = Math.max(1, artwork.offsetHeight);
       const shrink = Math.min(heroOffset, artworkHeight * .64);
       view.style.setProperty('--playlist-cover-offset', `${shrink}px`);
       view.style.setProperty('--playlist-cover-scale', String(1 - shrink / artworkHeight));
     } else if (isArtist) {
-      const fade = Math.min(1, heroOffset / Math.max(120, hero.height * .72));
-      view.style.setProperty('--detail-cover-progress', String(fade));
+      view.style.setProperty('--artist-cover-clip', `${Math.min(artworkHeight, heroOffset)}px`);
+      view.style.setProperty('--artist-cover-scale', String(1 + .055 * (1 - smoothProgress(heroOffset / pinDistance))));
     }
-    if (destination) {
-      view.style.setProperty('--detail-play-x', `${origin.right - destination.right}px`);
-      view.style.setProperty('--detail-play-y', `${destinationY - destination.top - destination.height / 2 + Math.max(0, remainingY)}px`);
+    if (!isArtist) {
+      navigation.style.setProperty('--detail-play-x', `${origin.right - destination.right}px`);
+      navigation.style.setProperty('--detail-play-y', `${destinationY - destination.top - destination.height / 2 + Math.max(0, remainingY)}px`);
       more.inert = collapse >= .98;
-      view.classList.add('detail-positioned');
+      navigation.classList.add('detail-positioned');
     }
   }
 
@@ -3475,6 +3608,7 @@ class App {
     let scrollEndTimer;
     const supportsScrollEnd = 'onscrollend' in content;
     const settleDetailScroll = () => {
+      if (content.scrollTop === this._collectionDetail?.restoredScrollTop) return;
       const search = this._collectionDetail?.searchAboveCover;
       if (search) {
         const height = search.offsetHeight;
@@ -3492,6 +3626,9 @@ class App {
     };
     content.addEventListener('scroll', () => {
       const top = content.scrollTop;
+      if (this._collectionDetail && top !== this._collectionDetail.restoredScrollTop) {
+        this._collectionDetail.restoredScrollTop = undefined;
+      }
       if (top !== previousTop) movingTowardTop = top < previousTop;
       previousTop = top;
       requestUpdate();
@@ -3504,6 +3641,41 @@ class App {
     window.addEventListener('resize', requestUpdate, { passive: true });
     if (typeof ResizeObserver === 'function') new ResizeObserver(requestUpdate).observe(content);
     document.fonts?.ready.then(requestUpdate);
+  }
+
+  // Android reports positions as fractions of the WebView width, including the Y axis.
+  beginSplitScroll(id, x, y) {
+    this._splitScroll = null;
+    const unit = window.visualViewport?.width || window.innerWidth;
+    const target = document.elementFromPoint(x * unit, y * unit);
+    if (!target || document.hidden || target.closest('input, textarea, select, [contenteditable], .drag-handle')) return 0;
+    let horizontal, vertical;
+    for (let el = target; el && el !== document.body; el = el.parentElement) {
+      const style = getComputedStyle(el);
+      if (style.touchAction === 'none') return 0;
+      if (!horizontal && /^(auto|scroll)$/.test(style.overflowX) && el.scrollWidth > el.clientWidth) horizontal = el;
+      if (!vertical && /^(auto|scroll)$/.test(style.overflowY) && el.scrollHeight > el.clientHeight) vertical = el;
+    }
+    this._splitScroll = { id, unit, horizontal, vertical, left: horizontal?.scrollLeft, top: vertical?.scrollTop };
+    return (horizontal ? 1 : 0) | (vertical ? 2 : 0);
+  }
+
+  moveSplitScroll(id, axis, distance, fling = 0) {
+    const drag = this._splitScroll;
+    if (drag?.id !== id) return;
+    const horizontal = axis === 1;
+    const el = horizontal ? drag.horizontal : drag.vertical;
+    if (!el?.isConnected || !el.clientHeight || document.hidden) return;
+    const prop = horizontal ? 'left' : 'top';
+    const end = drag[prop] + distance * drag.unit;
+    el.scrollTo({ [prop]: end, behavior: 'instant' });
+    if (fling && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      el.scrollTo({ [prop]: end + fling * drag.unit, behavior: 'smooth' });
+    }
+  }
+
+  endSplitScroll(id) {
+    if (this._splitScroll?.id === id) this._splitScroll = null;
   }
 
   setupMarqueeObserver() {
@@ -3561,34 +3733,35 @@ class App {
     const full = document.getElementById('full-player');
     if (!full || !full.classList.contains('active') || full.classList.contains('is-dismissing')) return;
 
+    const { transform, opacity, clipPath } = getComputedStyle(full);
+    // A close tap can interrupt the dock's opening animation or a downward swipe.
+    full.style.clipPath = clipPath;
     full.classList.remove('is-opening', 'is-dragging');
     full.classList.add('is-dismissing');
-    const closeToDock = window.matchMedia(SPLIT_PLAYER_QUERY).matches
-      && !full.classList.contains('player-expanded') && !full.style.transform;
-    if (closeToDock) {
-      full.style.clipPath = 'var(--minimized-player-clip)';
-    } else {
-      full.style.transition = 'transform .28s cubic-bezier(.32,.72,0,1), opacity .24s ease';
-      full.style.transform = 'translate3d(0, 100%, 0)';
-      full.style.opacity = '0';
-    }
-
-    window.setTimeout(() => {
+    const finish = () => {
       full.classList.remove('active', 'is-dismissing');
+      full.style.transition = '';
+      full.style.transform = '';
+      full.style.opacity = '';
       full.style.clipPath = '';
       this.setPlayerExpanded(false);
-      full.style.transition = 'none';
-      full.style.transform = 'translate3d(0, 100%, 0)';
-      full.style.opacity = '0';
       this.sendNativeMessage('overlay', { open: false, type: 'full-player' });
+      this.safeApplyMarquee();
+    };
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      finish();
+      return;
+    }
 
-      requestAnimationFrame(() => {
-        full.style.transform = 'translate3d(0, 100%, 0)';
-        full.style.opacity = '1';
-        full.style.transition = '';
-        this.safeApplyMarquee();
-      });
-    }, 290);
+    const animation = full.animate([
+      { transform, opacity },
+      { transform: 'translateY(calc(100% + var(--safe-bottom)))', opacity: 0 }
+    ], { duration: 280, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'both' });
+    const complete = () => {
+      finish();
+      animation.cancel();
+    };
+    animation.finished.then(complete, complete);
   }
 
   setupSwipeDismissals() {
@@ -3612,6 +3785,7 @@ class App {
           createButton?.setAttribute('aria-label', isOpening ? '만들기 메뉴 닫기' : '만들기 메뉴 열기');
         }
         if (isActive && !this.overlayStack.includes(id)) {
+          el.querySelector(':scope > .bottom-sheet')?.classList.add('is-opening');
           el.scrollTop = 0;
           el.querySelectorAll('.bottom-sheet, .sheet-menu-list, .create-sheet-options, .modal-dialog, .modal-body-scroll, .queue-list')
             .forEach(scrollable => { scrollable.scrollTop = 0; });
@@ -3619,6 +3793,7 @@ class App {
         const index = this.overlayStack.indexOf(id);
         if (isActive && index === -1) this.overlayStack.push(id);
         if (!isActive && index !== -1) this.overlayStack.splice(index, 1);
+        if (!isActive) el.querySelector(':scope > .bottom-sheet')?.classList.remove('is-opening');
       }
       notifyOverlayState();
     });
@@ -3629,6 +3804,13 @@ class App {
     document.querySelectorAll('.bottom-sheet-overlay').forEach(overlay => {
       const sheet = overlay.querySelector('.bottom-sheet');
       if (!sheet) return;
+      const createButton = overlay.id === 'create-sheet-overlay' ? document.getElementById('btn-nav-create') : null;
+      sheet.addEventListener('animationend', event => {
+        if (event.target === sheet && event.animationName === 'auraSheetSlideUp') {
+          sheet.classList.remove('is-opening');
+          sheet.style.removeProperty('--sheet-entry-transform');
+        }
+      });
       let gesture = null;
       let pointerId = null;
       let touchId = null;
@@ -3639,8 +3821,7 @@ class App {
         if (!overlay.classList.contains('active') || sheet.classList.contains('is-dismissing')) return;
         if (target.closest('input, textarea, select, [draggable="true"], .drag-handle')) return;
         const scroller = target.closest('.sheet-menu-list, .queue-list, .create-sheet-options') || sheet;
-        if (scroller.scrollTop > 1) return;
-        gesture = { x: point.clientX, y: point.clientY, distance: 0, dragging: false };
+        gesture = { x: point.clientX, y: point.clientY, scroller, distance: 0, dragging: false };
       };
 
       const move = (point, event) => {
@@ -3649,7 +3830,10 @@ class App {
         const dx = Math.abs(point.clientX - gesture.x);
         if (!gesture.dragging) {
           if (Math.max(dx, Math.abs(dy)) < 5) return;
-          if (dy <= dx) {
+          const scroller = gesture.scroller;
+          const canDismiss = dy > 0 ? scroller.scrollTop <= 1 :
+            createButton && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 1;
+          if (Math.abs(dy) <= dx || !canDismiss) {
             gesture = null;
             return;
           }
@@ -3658,6 +3842,10 @@ class App {
           const { transform, opacity } = getComputedStyle(sheet);
           gesture.position = new DOMMatrix(transform === 'none' ? undefined : transform);
           gesture.startOffset = gesture.position.m42;
+          if (createButton) {
+            gesture.fadeDistance = Math.max(1, sheet.offsetHeight);
+            createButton.classList.add('is-dragging');
+          }
           if (sheet.classList.contains('is-opening')) sheet.style.opacity = opacity;
           sheet.classList.remove('is-opening');
           sheet.classList.add('is-dragging');
@@ -3665,10 +3853,18 @@ class App {
             try { sheet.setPointerCapture(pointerId); } catch (_) {}
           }
         }
-        gesture.distance = Math.max(0, dy);
+        gesture.distance = createButton ? dy : Math.max(0, dy);
         gesture.position.m42 = gesture.startOffset + gesture.distance;
         sheet.style.transform = gesture.position.toString();
-        overlay.style.setProperty('--sheet-backdrop-progress', String(Math.max(0, 1 - gesture.distance / 260)));
+        const progress = Math.max(0, 1 - Math.abs(gesture.distance) / (gesture.fadeDistance || 260));
+        overlay.style.setProperty('--sheet-backdrop-progress', String(progress));
+        if (createButton) {
+          const opacity = String(Math.max(0, 1 - Math.abs(dy) / (gesture.fadeDistance * .75)));
+          sheet.style.opacity = opacity;
+          createButton.style.setProperty('--create-circle-opacity', opacity);
+          createButton.style.setProperty('--create-progress', String(progress));
+          createButton.style.setProperty('--create-turn', (dy < 0 ? 90 - 45 * progress : 45 * progress) + 'deg');
+        }
         if (event.cancelable) event.preventDefault();
       };
 
@@ -3678,9 +3874,15 @@ class App {
         if (!ended?.dragging || sheet.classList.contains('is-dismissing')) return;
         sheet.classList.remove('is-dragging');
         const threshold = Math.max(36, Math.min(96, sheet.clientHeight * .2));
-        if (!cancelled && ended.distance >= threshold) {
-          this.closeOverlayWithAnimation(overlay.id);
+        if (!cancelled && Math.abs(ended.distance) >= threshold) {
+          this.closeOverlayWithAnimation(overlay.id, ended.distance < 0 ? 'up' : 'down');
         } else {
+          if (createButton) {
+            createButton.classList.remove('is-dragging');
+            createButton.style.removeProperty('--create-circle-opacity');
+            createButton.style.removeProperty('--create-progress');
+            createButton.style.removeProperty('--create-turn');
+          }
           sheet.style.transform = '';
           sheet.style.opacity = '';
           overlay.style.removeProperty('--sheet-backdrop-progress');
@@ -3828,22 +4030,45 @@ class App {
     }
   }
 
-  rememberDetailBackView(targetView, albumId) {
+  getDetailId(view) {
+    return {
+      'playlist-detail': this.state.activePlaylistId,
+      'album-detail': this.state.albumDetailId,
+      'artist-detail': this.state.artistDetailId,
+      'folder-detail': this.state.folderDetailId
+    }[view];
+  }
+
+  captureViewPosition() {
+    const view = this.state.activeView;
+    const active = document.getElementById(`view-${view}`);
+    return {
+      view,
+      detailId: this.getDetailId(view),
+      scrollTop: document.getElementById('content-area').scrollTop,
+      scrollLeft: Array.from(active?.querySelectorAll('.horizontal-scroll, .playlist-detail-tools') || [], rail => rail.scrollLeft),
+      playlistSearch: view === 'playlist-detail' ? document.getElementById('playlist-search-input').value : '',
+      sortMode: view === 'playlist-detail' ? this.state.playlistSortMode : this.state.artistSortMode
+    };
+  }
+
+  restoreViewPosition(entry) {
+    const content = document.getElementById('content-area');
+    const active = document.getElementById(`view-${entry.view}`);
+    active?.querySelectorAll('.horizontal-scroll, .playlist-detail-tools').forEach((rail, index) => {
+      rail.scrollLeft = entry.scrollLeft[index] || 0;
+    });
+    content.scrollTo({ top: entry.scrollTop, behavior: 'instant' });
+    if (this._collectionDetail) this._collectionDetail.restoredScrollTop = content.scrollTop;
+    this.updateCollectionDetailScroll();
+  }
+
+  rememberDetailBackView(targetView, targetId) {
     const currentView = this.state.activeView;
-    const changingAlbum = currentView === 'album-detail' && albumId && albumId !== this.state.albumDetailId;
-    if (currentView && (currentView !== targetView || changingAlbum)) {
-      const stack = this.state.detailBackStack || (this.state.detailBackStack = []);
-      const entry = currentView === 'album-detail'
-        ? {
-            view: currentView,
-            albumId: this.state.albumDetailId,
-            scrollTop: document.getElementById('content-area').scrollTop,
-            scrollLeft: document.getElementById('album-related-list').scrollLeft
-          }
-        : { view: currentView };
-      stack.push(entry);
-      this.state.detailBackView = currentView;
-    }
+    if (!currentView || (currentView === targetView && targetId === this.getDetailId(currentView))) return;
+    const stack = this.state.detailBackStack || (this.state.detailBackStack = []);
+    stack.push(this.captureViewPosition());
+    this.state.detailBackView = currentView;
   }
 
   navigateBackFromDetail() {
@@ -3851,25 +4076,43 @@ class App {
     const entry = stack.pop();
     const previousView = entry?.view || this.state.previousView || 'library';
     this.state.detailBackView = stack[stack.length - 1]?.view || previousView;
-    if (entry?.albumId && this.openAlbumDetail(entry.albumId, { rememberBack: false })) {
-      document.getElementById('content-area').scrollTop = entry.scrollTop;
-      document.getElementById('album-related-list').scrollLeft = entry.scrollLeft;
-      this.updateCollectionDetailScroll();
+    if (!entry) {
+      this.switchView(previousView);
       return;
     }
-    this.switchView(previousView);
+    this.returnToView(entry);
+  }
+
+  returnToView(entry) {
+    const playlistSearch = document.getElementById('playlist-search-input');
+    const playlistChanged = entry.view === 'playlist-detail'
+      && (entry.playlistSearch !== playlistSearch.value || entry.sortMode !== this.state.playlistSortMode);
+    const artistChanged = entry.view === 'artist-detail' && entry.sortMode !== this.state.artistSortMode;
+    if (entry.detailId !== this.getDetailId(entry.view) || playlistChanged || artistChanged) {
+      const options = { rememberBack: false, restore: entry };
+      if (entry.view === 'album-detail' && this.openAlbumDetail(entry.detailId, options)) return;
+      if (entry.view === 'artist-detail') return this.openArtistDetail(entry.detailId, options);
+      if (entry.view === 'folder-detail') return this.openFolderDetail(entry.detailId, options);
+      if (entry.view === 'playlist-detail') {
+        const playlist = this.getPlaylist(entry.detailId);
+        if (playlist) return this.openPlaylistDetail(playlist, options);
+      }
+      return this.switchView(this.state.activeTab || 'library');
+    }
+    this.switchView(entry.view, { restore: entry });
   }
 
   backFromSettings() {
-    const returnView = this.state.previousView;
-    this.switchView(returnView && returnView !== 'settings' ? returnView : (this.state.activeTab || 'home'));
+    const entry = this.settingsReturnView;
+    this.settingsReturnView = null;
+    if (entry) this.returnToView(entry);
+    else this.switchView(this.state.activeTab || 'home');
   }
 
   handleBackNavigation() {
     const modal = document.getElementById('modal-overlay');
     if (modal?.classList.contains('active')) {
       if (this.musicImportInProgress) return true;
-      this.scrollMainContentToTop();
       modal.classList.remove('active');
       this.sendNativeMessage('overlay', { open: false, type: 'modal' });
       return true;
@@ -3879,10 +4122,10 @@ class App {
       document.getElementById(id)?.classList.contains('active')
     );
 
-    const lastOverlayId = this.overlayStack[this.overlayStack.length - 1];
-    const splitPlayer = lastOverlayId === 'full-player' && window.matchMedia(SPLIT_PLAYER_QUERY).matches
+    const docked = window.matchMedia(SPLIT_PLAYER_QUERY).matches
       && !document.getElementById('full-player').classList.contains('player-expanded');
-    if (this.state.activeView === 'settings' && (!lastOverlayId || splitPlayer)) {
+    const lastOverlayId = this.overlayStack.slice().reverse().find(id => id !== 'full-player' || !docked);
+    if (this.state.activeView === 'settings' && !lastOverlayId) {
       this.backFromSettings();
       return true;
     }
@@ -3891,7 +4134,6 @@ class App {
         this.setPlayerExpanded(false);
         return true;
       }
-      this.scrollMainContentToTop();
       if (lastOverlayId === 'full-player') {
         this.closeFullPlayer();
       } else if (lastOverlayId === 'profile-drawer-overlay') {
@@ -3903,7 +4145,6 @@ class App {
     }
 
     if (this.state.selectionMode) {
-      this.scrollMainContentToTop();
       this.toggleSelectionMode(false);
       return true;
     }
@@ -3916,7 +4157,7 @@ class App {
     return false;
   }
 
-  closeOverlayWithAnimation(id) {
+  closeOverlayWithAnimation(id, direction = 'down') {
     const overlay = document.getElementById(id);
     const sheet = overlay?.querySelector('.bottom-sheet');
     if (!overlay?.classList.contains('active') || !sheet || sheet.classList.contains('is-dismissing')) return;
@@ -3934,13 +4175,24 @@ class App {
     if (isCreateMenu) {
       window.clearTimeout(this._createMenuTimer);
       const createButton = document.getElementById('btn-nav-create');
-      createButton?.classList.remove('is-open');
-      createButton?.setAttribute('aria-label', '만들기 메뉴 열기');
+      if (direction === 'up') {
+        // A plus looks the same after each quarter turn. Keep this angle for the next clockwise opening.
+        const restAngle = parseFloat(createButton.style.getPropertyValue('--create-rest-angle')) || 0;
+        createButton.style.setProperty('--create-rest-angle', (restAngle + 90) + 'deg');
+      }
+      createButton.classList.remove('is-dragging', 'is-open');
+      createButton.style.removeProperty('--create-circle-opacity');
+      createButton.style.removeProperty('--create-progress');
+      createButton.style.removeProperty('--create-turn');
+      createButton.setAttribute('aria-expanded', 'false');
+      createButton.setAttribute('aria-label', '만들기 메뉴 열기');
+      sheet.style.opacity = '0';
     }
     sheet.style.transition = '';
-    position.m42 += 14;
-    sheet.style.transform = isCreateMenu ? position.toString() : 'translate3d(0, 100%, 0)';
-    if (isCreateMenu) sheet.style.opacity = '0';
+    sheet.style.removeProperty('--sheet-entry-transform');
+    sheet.style.transform = isCreateMenu && direction === 'up'
+      ? `translateY(${Math.min(-sheet.offsetHeight, position.m42)}px)`
+      : `translateY(max(${position.m42}px, calc(100% + var(--sheet-bottom-gap, 0px))))`;
     overlay.style.setProperty('--sheet-backdrop-progress', '0');
 
     const closeTimer = window.setTimeout(() => {
@@ -4168,6 +4420,7 @@ class App {
       this.state.activeFilter;
 
     let matchedPlaylistsCount = 0;
+    let matchedAlbumsCount = 0;
     let filteredTracksCount = 0;
 
     if (
@@ -4223,17 +4476,19 @@ class App {
       });
     }
 
-    if (filter === 'albums') {
+    if (filter === 'albums' || (filter === 'all' && this.albumCollections.size)) {
       const groups = this.getAlbumGroups();
-      let items = groups.filter(album => !q || album.name.toLowerCase().includes(q) || album.artist.toLowerCase().includes(q));
+      const items = groups.filter(album => (filter === 'albums' || this.albumCollections.has(album.id))
+        && (!q || album.name.toLowerCase().includes(q) || album.artist.toLowerCase().includes(q)));
+      matchedAlbumsCount = items.length;
       const librarySort = this.state.librarySortMode || this.state.activeSort;
       items.sort((a, b) => {
         if (librarySort === 'title_asc') return a.name.localeCompare(b.name, 'ko', { sensitivity: 'base' }) || a.artist.localeCompare(b.artist, 'ko', { sensitivity: 'base' });
         if (librarySort === 'recent_desc') return b.lastPlayedAt - a.lastPlayedAt || a.name.localeCompare(b.name, 'ko', { sensitivity: 'base' });
         return b.addedAt - a.addedAt || a.name.localeCompare(b.name, 'ko', { sensitivity: 'base' });
       });
-      if (!items.length) {
-        container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded icon">${q ? 'search_off' : 'album'}</span><p>${q ? '검색 결과가 없습니다.' : '앨범 정보가 있는 음악이 없습니다.'}</p></div>`;
+      if (!items.length && filter === 'albums') {
+        container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded icon">${q ? 'search_off' : 'album'}</span><p>${q ? '검색 결과가 없습니다.' : '앨범이 없습니다.'}</p></div>`;
       } else {
         items.forEach(album => {
           const row = this.createCollectionRow({
@@ -4296,7 +4551,7 @@ class App {
           ? filteredTracksCount === 0
           : filter === 'playlists'
             ? matchedPlaylistsCount === 0
-            : filteredTracksCount === 0 && matchedPlaylistsCount === 0;
+            : filteredTracksCount === 0 && matchedPlaylistsCount === 0 && matchedAlbumsCount === 0;
 
       if (shouldShowEmpty) {
         const message = q
@@ -4393,9 +4648,9 @@ class App {
 
     this.state.tracks.forEach(track => {
       const name = (track.album || '').trim();
-      if (!name || name.toLowerCase() === 'local file') return;
+      const id = albumTagId(track);
+      if (!id || this.albumCollections.has(id)) return;
       const artist = (track.artist || 'Unknown Artist').trim() || 'Unknown Artist';
-      const id = JSON.stringify([name.toLocaleLowerCase(), artist.toLocaleLowerCase()]);
       if (!groups.has(id)) groups.set(id, { id, name, artist, tracks: [], coverData: '', lastPlayedAt: 0, addedAt: 0 });
       const group = groups.get(id);
       group.tracks.push(track);
@@ -4404,8 +4659,20 @@ class App {
       group.addedAt = Math.max(group.addedAt, track.addedAt || 0);
     });
 
+    for (const [id, record] of this.albumCollections) {
+      if (record.deleted) continue;
+      const tracks = record.trackIds.map(trackId => this.getTrackById(trackId)).filter(Boolean);
+      const artists = new Set(tracks.map(track => track.artist?.trim()).filter(Boolean));
+      const artist = record.artist || (artists.size > 1 ? '여러 아티스트' : [...artists][0]) || '';
+      groups.set(id, {
+        id, name: record.name, artist, tracks, addedAt: record.createdAt,
+        lastPlayedAt: tracks.reduce((latest, track) => Math.max(latest, track.lastPlayedAt || 0), 0),
+        coverData: tracks.find(track => track.artworkData)?.artworkData || ''
+      });
+    }
     for (const group of groups.values()) {
       if (albumCovers[group.id]) group.coverData = albumCovers[group.id];
+      if (this.albumCollections.has(group.id)) continue;
       const savedOrder = savedOrders[group.id];
       if (Array.isArray(savedOrder) && savedOrder.length) {
         const rank = new Map(savedOrder.map((trackId, index) => [trackId, index]));
@@ -4456,12 +4723,40 @@ class App {
     return value;
   }
 
+  albumIdForTrack(track, context = null) {
+    const tag = albumTagId(track);
+    if (!this.albumCollections.size) return tag;
+    if (!this._assignedAlbums) {
+      const assigned = new Map();
+      const entries = [...this.albumCollections].sort(([a, x], [b, y]) => x.createdAt - y.createdAt || a.localeCompare(b));
+      for (const [id, record] of entries) {
+        for (const trackId of record.trackIds) {
+          if (!assigned.has(trackId)) assigned.set(trackId, new Set());
+          assigned.get(trackId).add(id);
+        }
+      }
+      this._assignedAlbums = assigned;
+    }
+    const assigned = this._assignedAlbums.get(track.id);
+    if (context?.type === 'album' && assigned?.has(context.id)) return context.id;
+    if (tag && (!this.albumCollections.has(tag) || assigned?.has(tag))) return tag;
+    return assigned?.values().next().value || '';
+  }
+
+  trackAlbumName(track, context = null) {
+    const id = this.albumIdForTrack(track, context);
+    return id ? this.albumCollections.get(id)?.name || track.album || '' : '';
+  }
+
+  async saveAlbumCollection(id, record) {
+    await this.storage.saveStateKey(ALBUM_COLLECTION_PREFIX + id, record);
+    this.albumCollections.set(id, record);
+    this._assignedAlbums = null;
+  }
+
   getAlbumForTrack(track) {
     if (!track) return null;
-    const albumName = (track.album || '').trim();
-    if (!albumName || albumName.toLowerCase() === 'local file') return null;
-    const artist = (track.artist || 'Unknown Artist').trim() || 'Unknown Artist';
-    const id = JSON.stringify([albumName.toLocaleLowerCase(), artist.toLocaleLowerCase()]);
+    const id = this.albumIdForTrack(track);
     return this.getAlbumGroups().find(album => album.id === id) || null;
   }
 
@@ -4474,12 +4769,49 @@ class App {
     this.setCoverElement(document.getElementById('album-sheet-art'), album.coverData || '', 'album');
     const list = document.getElementById('album-sheet-menu-items');
     list.innerHTML = `
+      <button type="button" class="sheet-menu-item clickable" id="btn-album-members"><span class="material-symbols-rounded" aria-hidden="true">library_music</span><span>수록곡 편집하기</span></button>
+      <button type="button" class="sheet-menu-item clickable" id="btn-album-release-edit"><span class="material-symbols-rounded" aria-hidden="true">edit</span><span>앨범 정보 편집하기</span></button>
       <div class="sheet-menu-item clickable" id="btn-album-edit-order"><span class="material-symbols-rounded">format_list_numbered</span><span>순서 편집하기</span></div>
       <div class="sheet-menu-item clickable" id="btn-album-cover-edit"><span class="material-symbols-rounded">image</span><span>커버 변경하기</span></div>
       <div class="sheet-menu-item clickable" id="btn-album-go-artist"><span class="material-symbols-rounded">person</span><span>아티스트로 이동하기</span></div>
       <div class="sheet-menu-item clickable" id="btn-album-add-queue"><span class="material-symbols-rounded">queue</span><span>다음 재생목록에 추가하기</span></div>
-      <div class="sheet-menu-item clickable" id="btn-album-add-playlist"><span class="material-symbols-rounded">playlist_add</span><span>플레이리스트에 추가하기</span></div>`;
+      <div class="sheet-menu-item clickable" id="btn-album-add-playlist"><span class="material-symbols-rounded">playlist_add</span><span>플레이리스트에 추가하기</span></div>
+      <button type="button" class="sheet-menu-item clickable destructive-menu-item" id="btn-album-delete"><span class="material-symbols-rounded" aria-hidden="true">delete</span><span>앨범 삭제하기</span></button>`;
     const overlay = document.getElementById('album-sheet-overlay');
+    list.querySelector('#btn-album-delete').onclick = () => {
+      this.closeSheet('album-sheet-overlay');
+      this.showModal('앨범 삭제', `<p>‘${escapeHtml(album.name)}’ 앨범을 삭제할까요?</p><p class="editor-help-text">수록곡은 보관함에 남습니다.</p>`, async () => {
+        const confirm = document.getElementById('btn-modal-confirm');
+        confirm.disabled = true;
+        try {
+          await this.deleteAlbum(album.id);
+        } catch {
+          confirm.disabled = false;
+          alert('앨범을 삭제하지 못했습니다. 다시 시도해 주세요.');
+          return;
+        }
+        this.closeSheet('modal-overlay');
+        this.state.albumMenuId = null;
+        if (this.state.albumDetailId === album.id) this.state.albumDetailId = null;
+        this.state.detailBackStack = this.state.detailBackStack.filter(entry => entry.detailId !== album.id || entry.view !== 'album-detail');
+        if (this.state.activeView === 'album-detail') this.navigateBackFromDetail();
+        else this.renderAll();
+        const playing = this.getCurrentTrack();
+        if (playing) {
+          this.syncNativeQueue();
+          this.updatePlayerUI(playing);
+          this.updateMediaSession(playing);
+        }
+      });
+    };
+    list.querySelector('#btn-album-members').onclick = () => {
+      this.closeSheet('album-sheet-overlay');
+      this.openAlbumCollectionEditor(album);
+    };
+    list.querySelector('#btn-album-release-edit').onclick = () => {
+      this.closeSheet('album-sheet-overlay');
+      this.openAlbumReleaseEditor(album.id);
+    };
     list.querySelector('#btn-album-edit-order').onclick = () => {
       this.closeSheet('album-sheet-overlay');
       this.openAlbumTrackEditor(album.id);
@@ -4488,7 +4820,9 @@ class App {
       this.closeSheet('album-sheet-overlay');
       this.openAlbumCoverEditor(album.id);
     };
-    list.querySelector('#btn-album-go-artist').onclick = () => {
+    const goToArtist = list.querySelector('#btn-album-go-artist');
+    if (!album.artist || !this.state.tracks.some(track => track.artist === album.artist)) goToArtist.remove();
+    goToArtist.onclick = () => {
       this.closeSheet('album-sheet-overlay');
       this.openArtistDetail(album.artist);
     };
@@ -4508,11 +4842,183 @@ class App {
     setTimeout(() => this.safeApplyMarquee(), 30);
   }
 
+  openAlbumReleaseEditor(albumId) {
+    const options = [...ALBUM_TYPES].map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
+    this.showModal('앨범 정보 편집', `
+      <label for="album-release-type">앨범 유형</label>
+      <select class="form-input" id="album-release-type"><option value="">미지정</option>${options}</select>
+      <label for="album-release-date">발매일</label>
+      <input class="form-input" type="date" id="album-release-date" min="0001-01-01" max="9999-12-31">`, async () => {
+      if (!dateInput.reportValidity()) return;
+      const release = albumReleaseInfo({ type: typeInput.value, date: dateInput.value });
+      const confirm = document.getElementById('btn-modal-confirm');
+      confirm.disabled = true;
+      try {
+        await this.storage.saveStateKey(ALBUM_RELEASE_PREFIX + albumId, release);
+      } catch {
+        confirm.disabled = false;
+        alert('앨범 정보를 저장하지 못했습니다. 다시 시도해 주세요.');
+        return;
+      }
+      this.albumReleases.set(albumId, release);
+      if (this.state.activeView === 'album-detail' && this.state.albumDetailId === albumId) {
+        this.renderAlbumRelease(albumId);
+        this.updateCollectionDetailScroll();
+      }
+      if (dateInput.isConnected) {
+        this.closeSheet('modal-overlay');
+        this.sendNativeMessage('overlay', { open: false, type: 'modal' });
+      }
+    });
+    const typeInput = document.getElementById('album-release-type');
+    const dateInput = document.getElementById('album-release-date');
+    const saved = this.albumReleases.get(albumId);
+    typeInput.value = saved?.type || '';
+    dateInput.value = saved?.date || '';
+  }
+
+  renderAlbumRelease(albumId) {
+    const label = document.getElementById('album-release-info');
+    const release = this.albumReleases.get(albumId);
+    const parts = [ALBUM_TYPES.get(release?.type)];
+    if (release?.date) {
+      const [year, month, day] = release.date.split('-').map(Number);
+      parts.push(`${day} ${month}월${year === new Date().getFullYear() ? '' : ' ' + year}`);
+    }
+    label.textContent = parts.filter(Boolean).join(' • ');
+    label.hidden = !label.textContent;
+  }
+
+  async deleteAlbum(id) {
+    if (id.startsWith('album_')) {
+      await this.storage.deleteStateKey(ALBUM_COLLECTION_PREFIX + id);
+      this.albumCollections.delete(id);
+    } else {
+      // The unchanged file tags would otherwise recreate the album on the next render.
+      await this.saveAlbumCollection(id, { deleted: true, trackIds: [] });
+    }
+    this._assignedAlbums = null;
+    this.albumReleases.delete(id);
+    const cleanup = [
+      this.storage.deleteStateKey(ALBUM_RELEASE_PREFIX + id),
+      this.storage.deleteCoverSource('album:' + id)
+    ];
+    for (const field of ['auraAlbumCovers', 'auraAlbumTrackOrder']) {
+      try {
+        const values = this.getStoredLocalObject(field);
+        if (Object.hasOwn(values, id)) {
+          const remaining = { ...values };
+          delete remaining[id];
+          localStorage.setItem(field, JSON.stringify(remaining));
+        }
+      } catch (error) {
+        console.warn('삭제한 앨범의 부가 정보를 정리하지 못했습니다.', field, error);
+      }
+    }
+    if (this.state.playbackContext?.type === 'album' && this.state.playbackContext.id === id) {
+      const context = this.normalizePlaybackContext({ type: 'library' }, this.getCurrentTrack());
+      this.state.playbackContext = context;
+      cleanup.push(this.storage.saveStateKey('sourcePlaylist', context));
+    }
+    for (const result of await Promise.allSettled(cleanup)) {
+      if (result.status === 'rejected') console.warn('삭제한 앨범의 부가 정보를 정리하지 못했습니다.', result.reason);
+    }
+  }
+
+  openCreateAlbumModal() {
+    this.showModal('새 앨범', '<div class="modal-body-scroll"><input class="form-input" id="collection-name" type="text" aria-label="앨범 이름" placeholder="이름 입력" required></div>', async () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.setCustomValidity('앨범 이름을 입력해 주세요.');
+        input.reportValidity();
+        return;
+      }
+      const id = 'album_' + (crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-'));
+      const confirm = document.getElementById('btn-modal-confirm');
+      confirm.disabled = true;
+      try {
+        await this.saveAlbumCollection(id, { name, artist: '', trackIds: [], createdAt: Date.now() });
+      } catch {
+        if (input.isConnected) confirm.disabled = false;
+        alert('앨범을 저장하지 못했습니다. 다시 시도해 주세요.');
+        return;
+      }
+      if (input.isConnected && document.getElementById('modal-overlay').classList.contains('active')) {
+        this.closeSheet('modal-overlay');
+        this.openAlbumDetail(id);
+      }
+    });
+    const input = document.getElementById('collection-name');
+    input.oninput = () => input.setCustomValidity('');
+  }
+
+  openAlbumCollectionEditor(album) {
+    const record = this.albumCollections.get(album.id);
+    const selected = new Set(album.tracks.map(track => track.id));
+    const choices = this.state.tracks.map(track => `
+      <label class="custom-checkbox-label">
+        <input type="checkbox" value="${escapeHtml(track.id)}" ${selected.has(track.id) ? 'checked' : ''}>
+        <span>${escapeHtml(track.title)} · ${escapeHtml(track.artist || '알 수 없는 아티스트')}</span>
+      </label>`).join('');
+    this.showModal('수록곡 편집', `
+      <div class="modal-body-scroll">
+        <label for="collection-name">앨범 이름</label>
+        <input class="form-input" id="collection-name" required value="${escapeHtml(album?.name || '')}">
+        <label for="collection-artist">앨범 아티스트</label>
+        <input class="form-input" id="collection-artist" placeholder="미입력 시 수록곡 기준" value="${escapeHtml(record ? record.artist : album?.artist || '')}">
+        <label for="album-track-search">수록곡 선택</label>
+        <input class="form-input" type="search" id="album-track-search" placeholder="곡 또는 아티스트 검색">
+        <div id="album-track-choices">${choices || '<p>보관함에 곡이 없습니다.</p>'}</div>
+      </div>`, async () => {
+      if (!nameInput.value.trim()) {
+        nameInput.setCustomValidity('앨범 이름을 입력해 주세요.');
+        nameInput.reportValidity();
+        return;
+      }
+      const checked = new Set(Array.from(list.querySelectorAll('input:checked'), input => input.value));
+      const original = album?.tracks.map(track => track.id) || [];
+      const trackIds = [...new Set([...original, ...checked])].filter(id => checked.has(id) && this.getTrackById(id));
+      const id = album.id;
+      const confirm = document.getElementById('btn-modal-confirm');
+      confirm.disabled = true;
+      try {
+        await this.saveAlbumCollection(id, {
+          name: nameInput.value.trim(), artist: artistInput.value.trim(), trackIds,
+          createdAt: record?.createdAt || album?.addedAt || Date.now()
+        });
+      } catch {
+        if (nameInput.isConnected) confirm.disabled = false;
+        alert('앨범을 저장하지 못했습니다. 다시 시도해 주세요.');
+        return;
+      }
+      const playing = this.getCurrentTrack();
+      if (playing) {
+        this.syncNativeQueue();
+        this.updatePlayerUI(playing);
+        this.updateMediaSession(playing);
+      }
+      if (!nameInput.isConnected || !document.getElementById('modal-overlay').classList.contains('active')) return;
+      this.closeSheet('modal-overlay');
+      const inAlbum = this.state.activeView === 'album-detail' && this.state.albumDetailId === id;
+      this.openAlbumDetail(id, inAlbum ? { rememberBack: false, restore: this.captureViewPosition() } : {});
+    });
+    const nameInput = document.getElementById('collection-name');
+    const artistInput = document.getElementById('collection-artist');
+    const list = document.getElementById('album-track-choices');
+    nameInput.oninput = () => nameInput.setCustomValidity('');
+    document.getElementById('album-track-search').oninput = event => {
+      const query = event.target.value.trim().toLocaleLowerCase();
+      for (const label of list.children) {
+        if (label.tagName === 'LABEL') label.hidden = !label.textContent.toLocaleLowerCase().includes(query);
+      }
+    };
+  }
+
   openAlbumTrackEditor(albumId) {
     const album = this.getAlbumGroups().find(item => item.id === albumId);
     if (!album) return;
     const tracksHtml = album.tracks.map(track => `
-      <div class="drag-item album-drag-item" data-id="${track.id}">
+      <div class="drag-item album-drag-item" data-id="${escapeHtml(track.id)}">
         <button type="button" class="btn-icon drag-handle clickable" aria-label="순서 변경"><span class="material-symbols-rounded">drag_handle</span></button>
         <div class="track-main"><div class="track-title-viewport"><div class="track-title marquee-content">${escapeHtml(track.title)}</div></div><div class="track-artist-viewport"><div class="track-artist marquee-content">${escapeHtml(track.artist)}</div></div></div>
       </div>`).join('');
@@ -4520,8 +5026,22 @@ class App {
       const list = document.getElementById('album-drag-list');
       if (list) {
         const order = [...list.querySelectorAll('.album-drag-item')].map(el => el.dataset.id);
-        const orders = { ...this.getStoredAlbumTrackOrders(), [albumId]: order };
-        localStorage.setItem('auraAlbumTrackOrder', JSON.stringify(orders));
+        const record = this.albumCollections.get(albumId);
+        const confirm = document.getElementById('btn-modal-confirm');
+        confirm.disabled = true;
+        try {
+          if (record) {
+            await this.saveAlbumCollection(albumId, { ...record, trackIds: order });
+          } else {
+            const orders = { ...this.getStoredAlbumTrackOrders(), [albumId]: order };
+            localStorage.setItem('auraAlbumTrackOrder', JSON.stringify(orders));
+          }
+        } catch {
+          if (list.isConnected) confirm.disabled = false;
+          alert('곡 순서를 저장하지 못했습니다. 다시 시도해 주세요.');
+          return;
+        }
+        if (!list.isConnected) return;
         this.renderAlbumTracks(albumId);
         this.renderLibrary(document.getElementById('library-search-input')?.value || '');
       }
@@ -4577,7 +5097,7 @@ class App {
     });
   }
 
-  openAlbumDetail(albumId, { rememberBack = true } = {}) {
+  openAlbumDetail(albumId, { rememberBack = true, restore } = {}) {
     const albums = this.getAlbumGroups();
     const album = albums.find(item => item.id === albumId);
     if (!album) return false;
@@ -4608,8 +5128,8 @@ class App {
       }
     };
     this.updatePlaylistPlayButton();
-    this.switchView('album-detail');
-    document.getElementById('album-related-list').scrollLeft = 0;
+    this.switchView('album-detail', { restore });
+    if (!restore) document.getElementById('album-related-list').scrollLeft = 0;
     setTimeout(() => this.safeApplyMarquee(), 30);
     return true;
   }
@@ -4627,7 +5147,8 @@ class App {
     const tracks = album?.tracks || [];
     const duration = formatTotalTime(tracks, { includeSeconds: true });
     document.getElementById('album-track-summary').textContent = `곡 ${tracks.length}개 · ${duration}`;
-    container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>검색 결과가 없습니다.</p></div>';
+    this.renderAlbumRelease(albumId);
+    container.innerHTML = tracks.length ? '' : '<div class="empty-state"><p>수록곡이 없습니다.</p></div>';
     tracks.forEach(track => container.appendChild(this.createTrackRow(track, tracks, false, { type: 'album', id: albumId, name: album?.name || track.album || '' })));
     if (album) {
       this.setCoverElement(document.getElementById('album-artist-avatar'), this.getStoredLocalObject('auraArtistCovers')[album.artist], 'person');
@@ -4642,7 +5163,7 @@ class App {
     const section = document.getElementById('album-related');
     const list = document.getElementById('album-related-list');
     const artist = album?.artist.toLocaleLowerCase();
-    const related = album ? albums.filter(item => item.id !== album.id && item.artist.toLocaleLowerCase() === artist) : [];
+    const related = artist ? albums.filter(item => item.id !== album.id && item.artist.toLocaleLowerCase() === artist) : [];
     related.sort((a, b) => b.addedAt - a.addedAt || a.name.localeCompare(b.name, 'ko'));
     section.hidden = !related.length;
     document.getElementById('album-related-title').textContent = related.length ? `${album.artist}의 곡 더 보기` : '';
@@ -4663,8 +5184,8 @@ class App {
     list.replaceChildren(cards);
   }
 
-  openFolderDetail(folderName) {
-    this.rememberDetailBackView('folder-detail');
+  openFolderDetail(folderName, { rememberBack = true, restore } = {}) {
+    if (rememberBack) this.rememberDetailBackView('folder-detail', folderName);
     this.state.folderDetailId =
       folderName;
 
@@ -4739,9 +5260,7 @@ class App {
         }
       };
 
-    this.switchView(
-      'folder-detail'
-    );
+    this.switchView('folder-detail', { restore });
   }
 
   createCollectionRow({
@@ -4832,7 +5351,7 @@ class App {
 
     element.addEventListener('pointermove', event => {
       if (event.pointerId !== pointerId) return;
-      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 12) clearPress();
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) >= TOUCH_DRAG_SLOP) clearPress();
     });
 
     const finishPress = event => {
@@ -4869,16 +5388,14 @@ class App {
         'div'
       );
 
-    row.className =
-      `track-row clickable ${
-        track.id ===
-        this.state.currentTrackId
-          ? 'playing'
-          : ''
-      }`;
-
-    row.dataset.id =
-      track.id;
+    row.className = 'track-row clickable';
+    row.dataset.id = track.id;
+    const showWave = ['playlist', 'album', 'artist'].includes(playbackContext?.type);
+    if (showWave) {
+      row.dataset.contextType = playbackContext.type;
+      row.dataset.contextId = playbackContext.id;
+    }
+    this.updateTrackRowHighlight(row);
 
     const allowSelection =
       this.state.selectionMode &&
@@ -4922,19 +5439,11 @@ class App {
       ${artworkHtml}
 
       <div class="track-main">
-
-        <div
-          class="track-title-viewport">
-
-          <div
-            class="track-title marquee-content">
-
-            ${escapeHtml(
-              track.title
-            )}
-
+        <div class="track-title-line">
+          ${showWave ? '<span class="track-wave" aria-hidden="true"><i></i><i></i><i></i></span>' : ''}
+          <div class="track-title-viewport">
+            <div class="track-title marquee-content">${escapeHtml(track.title)}</div>
           </div>
-
         </div>
 
         <div
@@ -5239,20 +5748,18 @@ class App {
     }
   }
 
-  openPlaylistDetail(
-    playlist
-  ) {
-    this.rememberDetailBackView('playlist-detail');
+  openPlaylistDetail(playlist, { rememberBack = true, restore } = {}) {
+    if (rememberBack) this.rememberDetailBackView('playlist-detail', playlist.id);
     this.state.activePlaylistId =
       playlist.id;
 
-    this.state.playlistSortMode = 'default';
+    this.state.playlistSortMode = restore?.sortMode || 'default';
 
     document
       .getElementById(
         'playlist-search-input'
       )
-      .value = '';
+      .value = restore?.playlistSearch || '';
     document.getElementById('btn-clear-playlist-search')?.classList.add('hidden');
 
     document
@@ -5276,12 +5783,9 @@ class App {
       'queue_music'
     );
 
-    this.renderPlaylistTracks(
-      playlist,
-      ''
-    );
+    this.renderPlaylistTracks(playlist, restore?.playlistSearch || '');
 
-    this.switchView('playlist-detail');
+    this.switchView('playlist-detail', { restore });
 
     const playlistSheetArt = document.getElementById('pl-sheet-art');
     if (playlistSheetArt) {
@@ -6153,14 +6657,12 @@ class App {
     return ordered;
   }
 
-  openArtistDetail(
-    artistName
-  ) {
-    this.rememberDetailBackView('artist-detail');
+  openArtistDetail(artistName, { rememberBack = true, restore } = {}) {
+    if (rememberBack) this.rememberDetailBackView('artist-detail', artistName);
     this.state.artistDetailId = artistName;
     document.getElementById('artist-detail-title').textContent = artistName;
 
-    this.state.artistSortMode = 'default';
+    this.state.artistSortMode = restore?.sortMode || 'default';
 
     this.renderArtistTracks(artistName);
 
@@ -6171,7 +6673,7 @@ class App {
       'person'
     );
 
-    this.switchView('artist-detail');
+    this.switchView('artist-detail', { restore });
 
     document.getElementById('btn-play-artist').onclick = () => {
       const currentTracks = this.getVisibleArtistTracks(artistName);
@@ -6311,6 +6813,7 @@ class App {
     this.openCoverEditor({
       title: '아티스트 커버 변경', inputId: 'artist-cover-file', previewId: 'artist-cover-preview',
       icon: 'person', cropShape: 'circle', currentData: covers[artistName] || '', sourceKey: `artist:${artistName}`,
+      largeArtwork: true,
       onSave: async ({ cropData }) => {
         if (!cropData) { alert('이미지를 선택하거나 기존 사진을 조절해주세요.'); throw new Error('커버 이미지가 없습니다.'); }
         const current = this.getStoredLocalObject('auraArtistCovers');
@@ -6318,7 +6821,7 @@ class App {
         localStorage.setItem('auraArtistCovers', JSON.stringify(current));
       },
       afterSave: async () => {
-        this.openArtistDetail(artistName);
+        this.openArtistDetail(artistName, { rememberBack: false, restore: this.captureViewPosition() });
         this.renderLibrary(document.getElementById('library-search-input')?.value || '');
       }
     });
@@ -6754,7 +7257,7 @@ class App {
     const miniProgress = String(progress / 100);
     document.getElementById('mini-progress-fill')?.style.setProperty('--mini-progress', miniProgress);
 
-    const artwork = this.getTrackArtworkData(track);
+    const artwork = this.getTrackArtworkData(track, null, this.state.playbackContext);
     this.setCoverElement(
       document.querySelector(
         '.mini-album-art'
@@ -6828,7 +7331,7 @@ class App {
     }
 
     try {
-      const artwork = this.getTrackArtworkData(track);
+      const artwork = this.getTrackArtworkData(track, null, this.state.playbackContext);
       navigator.mediaSession.metadata =
         new MediaMetadata({
           title:
@@ -6839,7 +7342,7 @@ class App {
             'Unknown Artist',
 
           album:
-            track.album ||
+            this.trackAlbumName(track, this.state.playbackContext) ||
             'AuraSound',
 
           artwork: artwork ? [{ src: artwork }] : []
@@ -7021,19 +7524,17 @@ class App {
   }
 
   updateActiveTrackHighlights() {
-    const current =
-      this.getCurrentTrack();
+    document.querySelectorAll('.track-row').forEach(row => this.updateTrackRowHighlight(row));
+  }
 
-    document
-      .querySelectorAll(
-        '.track-row'
-      )
-      .forEach(row => {
-        const active = row.dataset.contextType
-          ? this.isCurrentCollection(row.dataset.contextType, row.dataset.contextId)
-          : Boolean(current && row.dataset.id === current.id);
-        row.classList.toggle('playing', active);
-      });
+  updateTrackRowHighlight(row) {
+    const { id, contextType, contextId } = row.dataset;
+    const matchesSong = id != null && id === String(this.state.currentTrackId);
+    const active = contextType
+      ? this.isCurrentCollection(contextType, contextId) && (id == null || matchesSong)
+      : matchesSong;
+    row.classList.toggle('playing', active);
+    row.classList.toggle('wave-running', Boolean(active && id && contextType && this.state.isPlaying));
   }
 
   isCurrentCollection(type, id) {
@@ -7099,7 +7600,8 @@ window.addEventListener(
   () => {
     app = new App();
     window.app = app;
-    app.init().catch(error => {
+    const shell = document.getElementById('playback-shell');
+    app.init().finally(() => shell.removeAttribute('aria-busy')).catch(error => {
       console.error('[AuraSound] 보관함 열기 실패', error);
       alert('보관함을 열지 못했습니다. 앱 데이터와 음악 파일을 그대로 두고 앱을 다시 열어 주세요.');
     });

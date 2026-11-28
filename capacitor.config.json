@@ -1,5 +1,9 @@
 {
   "appId": "com.aurasound.app",
   "appName": "AuraSound",
-  "webDir": "www"
+  "webDir": "www",
+  "android": { "backgroundColor": "#121212" },
+  "plugins": {
+    "SystemBars": { "style": "DARK", "initialViewportFitValueHint": "cover" }
+  }
 }

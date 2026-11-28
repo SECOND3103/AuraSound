@@ -226,6 +226,15 @@ export class StorageManager {
     return this.saveStateEntries([{ key, value }]);
   }
 
+  async deleteCoverSource(id) {
+    if (this.db) await this.runTransaction(['coverSources'], 'readwrite', tx => tx.objectStore('coverSources').delete(id));
+  }
+
+  async deleteStateKey(key) {
+    if (this.library) return this.library.removeRecord('appState', key);
+    return this.runTransaction(['appState'], 'readwrite', tx => tx.objectStore('appState').delete(key));
+  }
+
   async savePlaybackState(trackId, position) {
     return this.saveStateEntries([
       { key: 'lastTrackId', value: trackId },

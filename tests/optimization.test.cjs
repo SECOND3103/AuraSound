@@ -105,6 +105,30 @@ test('home playback indicator follows the active collection when a queued song h
   assert.deepEqual([...queued.classes], ['is-context-active']);
 });
 
+test('detail track highlights follow both the song and its playback source', () => {
+  const { app } = loadApp();
+  const highlight = (id, contextType, contextId) => {
+    const flags = {};
+    app.updateTrackRowHighlight({
+      dataset: { id, contextType, contextId },
+      classList: { toggle(key, value) { flags[key] = value; } }
+    });
+    return [flags.playing, flags['wave-running']];
+  };
+  app.state.currentTrackId = 'song';
+  app.state.isPlaying = true;
+  for (const source of ['playlist', 'album', 'artist']) {
+    app.state.playbackContext = { type: source, id: 'source' };
+    for (const type of ['playlist', 'album', 'artist']) {
+      assert.deepEqual(highlight('song', type, 'source'), [type === source, type === source]);
+    }
+    assert.deepEqual(highlight('song', source, 'other'), [false, false]);
+    assert.deepEqual(highlight('other', source, 'source'), [false, false]);
+  }
+  app.state.isPlaying = false;
+  assert.deepEqual(highlight('song', 'artist', 'source'), [true, false]);
+});
+
 test('startup restores false/zero settings, queue order and the latest native position', async () => {
   const volumeInput = {};
   const { app, window } = loadApp({ document: { getElementById: () => volumeInput } });
@@ -580,6 +604,128 @@ test('a backup restores the custom cover and order for the correct album when ti
   // A legacy backup contains no album overrides.
   await restored.handleBackupResult('imported', '{"albumCovers":{},"albumTrackOrder":{}}');
   assert.equal(restored.getTrackArtworkData(tracks[0]), customCover);
+});
+
+test('album release metadata round-trips by artist and tolerates older or malformed backups', async () => {
+  const source = androidLibraryFixture();
+  const app = source.launch();
+  await app.storage.init();
+  const id = JSON.stringify(['first', 'artist one']);
+  const otherId = JSON.stringify(['first', 'artist two']);
+  const key = 'albumRelease:' + id;
+  const otherKey = 'albumRelease:' + otherId;
+  const leapDay = { type: 'ep', date: '2024-02-29' };
+  await app.storage.saveStateKey(key, leapDay);
+  let payload;
+  source.files.beginImport = () => {};
+  source.files.exportBackup = json => { payload = json; };
+  await app.exportBackup();
+
+  const restored = androidLibraryFixture().launch();
+  await restored.storage.init();
+  restored.renderAll = restored.updateSettingsUI = restored.backupProgress.showImportSummary = () => {};
+  const existing = { type: 'single', date: '2020-10-12' };
+  await restored.storage.saveStateKey(otherKey, existing);
+  await restored.handleBackupResult('imported', payload);
+  assert.deepEqual({ ...await restored.storage.getStateKey(key) }, leapDay);
+  assert.deepEqual({ ...restored.albumReleases.get(id) }, leapDay);
+  await restored.restoreBackupPreferences({ appState: [
+    { key: otherKey, value: { type: 'album', date: '2026-05-05' } },
+    { key: 'albumRelease:invalid', value: { type: 'unknown', date: '2023-02-29' } }
+  ] });
+  assert.deepEqual({ ...restored.albumReleases.get(otherId) }, existing);
+  assert.deepEqual({ ...restored.albumReleases.get('invalid') }, { type: '', date: '' });
+  await restored.restoreBackupPreferences({});
+  assert.deepEqual({ ...await restored.storage.getStateKey(key) }, leapDay);
+});
+
+test('Android Back uses the left pane with a docked player and collapses an expanded player first', () => {
+  const classes = new Set(['active']);
+  const full = { classList: { contains: name => classes.has(name) } };
+  const { app, window } = loadApp({ document: { getElementById: id => id === 'full-player' ? full : null } });
+  let wide = true;
+  window.matchMedia = () => ({ matches: wide });
+  app.overlayStack = ['full-player'];
+  app.state.activeView = 'album-detail';
+  app.navigateBackFromDetail = () => { app.state.activeView = 'library'; };
+  app.setPlayerExpanded = () => classes.delete('player-expanded');
+  app.closeFullPlayer = () => classes.delete('active');
+  classes.add('player-expanded');
+  assert.equal(app.handleBackNavigation(), true);
+  assert.equal(app.state.activeView, 'album-detail');
+  assert.equal(classes.has('player-expanded'), false);
+  assert.equal(app.handleBackNavigation(), true);
+  assert.equal(app.state.activeView, 'library');
+  assert.equal(app.handleBackNavigation(), false);
+  assert.equal(classes.has('active'), true);
+  wide = false;
+  assert.equal(app.handleBackNavigation(), true);
+  assert.equal(classes.has('active'), false);
+});
+
+test('album membership and empty albums survive backup alongside legacy tags and ordering', async () => {
+  const source = androidLibraryFixture();
+  const app = source.launch();
+  await app.storage.init();
+  app.state.tracks = await app.storage.getAllTracks();
+  const [first, second] = app.state.tracks;
+  Object.assign(first, { album: 'Original', artist: 'Artist', artworkData: 'embedded' });
+  await app.storage.saveTrack(first);
+  const original = app.getAlbumForTrack(first);
+  const collection = { name: 'My album', artist: '', trackIds: [second.id, first.id], createdAt: 10 };
+  await app.saveAlbumCollection('album_custom', collection);
+  assert.equal(app.albumIdForTrack(first), original.id);
+  assert.equal(app.albumIdForTrack(first, { type: 'album', id: 'album_custom' }), 'album_custom');
+  await app.saveAlbumCollection(original.id, { ...collection, name: 'Original', trackIds: [] });
+  assert.equal(app.getAlbumForTrack(first).id, 'album_custom');
+  const { launch } = androidLibraryFixture();
+  const restored = launch();
+  await restored.storage.init();
+  restored.state.tracks = await restored.storage.getAllTracks();
+  restored.renderAll = restored.updateSettingsUI = restored.backupProgress.showImportSummary = () => {};
+  let payload;
+  source.files.beginImport = () => {};
+  source.files.exportBackup = json => { payload = json; };
+  await app.exportBackup();
+  await restored.handleBackupResult('imported', payload);
+  assert.deepEqual(Array.from(restored.getVisibleAlbumTracks('album_custom'), t => t.id), collection.trackIds);
+  assert.equal(restored.getAlbumGroups().find(a => a.id === original.id).tracks.length, 0);
+  assert.equal(restored.getTrackArtworkData(second, restored.buildArtworkLookup()), 'embedded');
+  restored.storage.saveStateKey = async () => { throw Error('storage full'); };
+  await assert.rejects(restored.saveAlbumCollection('album_custom', { ...collection, trackIds: [] }));
+  assert.deepEqual(Array.from(restored.getVisibleAlbumTracks('album_custom'), t => t.id), collection.trackIds);
+});
+
+test('deleting custom and tagged albums preserves their songs through backup and restore', async () => {
+  const source = androidLibraryFixture();
+  const app = source.launch();
+  await app.storage.init();
+  app.state.tracks = await app.storage.getAllTracks();
+  const [song] = app.state.tracks;
+  Object.assign(song, { album: 'Original', artist: 'Artist', artworkData: 'embedded' });
+  await app.storage.saveTrack(song);
+  const original = app.getAlbumForTrack(song).id;
+  const custom = 'album_custom';
+  await app.saveAlbumCollection(custom, { name: 'My album', trackIds: [song.id], createdAt: 10 });
+  await app.deleteAlbum(original);
+  assert.equal(app.getAlbumForTrack(song).id, custom);
+  await app.deleteAlbum(custom);
+  assert.equal(app.getAlbumForTrack(song), null);
+  assert.equal(app.getTrackArtworkData(song), 'embedded');
+  assert.ok((await app.storage.getAllTracks()).some(track => track.id === song.id));
+
+  let payload;
+  source.files.beginImport = () => {};
+  source.files.exportBackup = json => { payload = json; };
+  await app.exportBackup();
+  const restored = androidLibraryFixture().launch();
+  await restored.storage.init();
+  restored.renderAll = restored.updateSettingsUI = restored.backupProgress.showImportSummary = () => {};
+  await restored.handleBackupResult('imported', payload);
+  const restoredSong = restored.state.tracks.find(track => track.id === song.id);
+  assert.equal(restoredSong.album, 'Original');
+  assert.equal(restored.getAlbumForTrack(restoredSong), null);
+  assert.equal(restored.getAlbumGroups().some(album => album.id === custom), false);
 });
 
 test('rapid export taps open one Android picker and cancelling allows another export', async () => {

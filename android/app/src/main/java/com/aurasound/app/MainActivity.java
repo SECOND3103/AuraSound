@@ -20,13 +20,14 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.app.ActivityCompat;
+import androidx.core.splashscreen.SplashScreen;
 import androidx.core.content.ContextCompat;
-import androidx.core.view.WindowCompat;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.MimeTypes;
@@ -72,6 +73,9 @@ public class MainActivity extends BridgeActivity {
     private static volatile String currentView = "home";
     private static volatile boolean overlayOpen = false;
     private static WeakReference<WebView> webViewRef;
+    private volatile boolean inMultiWindow;
+    private SplitWindowScroll splitScroll;
+    private boolean requestedPlaybackNotifications;
     private File currentImportFile;
     private File currentImportTemp;
     private FileOutputStream currentImportStream;
@@ -156,15 +160,25 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle bundle) {
+        SplashScreen.installSplashScreen(this);
         super.onCreate(bundle);
+        inMultiWindow = isInMultiWindowMode();
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SPLIT_TOUCH);
         WebView webView = getBridge().getWebView();
-        applyStatusBarAppearance();
+        splitScroll = new SplitWindowScroll(this, webView);
+        webView.setOnTouchListener(splitScroll);
         webViewRef = new WeakReference<>(webView);
         getOnBackPressedDispatcher().addCallback(this, new BackPressCallback(true));
-        if (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") == 0) {
+    }
+
+    private void requestPlaybackNotifications() {
+        if (Build.VERSION.SDK_INT < 33 || requestedPlaybackNotifications || !hasWindowFocus() || isFinishing()
+                || ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             return;
         }
-        ActivityCompat.requestPermissions(this, new String[]{"android.permission.POST_NOTIFICATIONS"}, 202);
+        requestedPlaybackNotifications = true;
+        ActivityCompat.requestPermissions(this, new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 202);
     }
 
     class BackPressCallback extends OnBackPressedCallback {
@@ -194,23 +208,22 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    private void applyStatusBarAppearance() {
-        getWindow().setStatusBarColor(Color.BLACK);
-        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView()).setAppearanceLightStatusBars(false);
+    @Override
+    public void onMultiWindowModeChanged(boolean inMultiWindowMode) {
+        super.onMultiWindowModeChanged(inMultiWindowMode);
+        inMultiWindow = inMultiWindowMode;
     }
 
     @Override
-    public void onResume() {
-        super.onResume();
-        applyStatusBarAppearance();
+    public void onTopResumedActivityChanged(boolean topResumed) {
+        super.onTopResumedActivityChanged(topResumed);
+        if (splitScroll != null) splitScroll.topResumedChanged(topResumed);
     }
 
     @Override
     public void onWindowFocusChanged(boolean z) {
         super.onWindowFocusChanged(z);
-        if (z) {
-            applyStatusBarAppearance();
-        }
+        if (splitScroll != null && !z) splitScroll.lostInteraction();
     }
 
     private void connectToPlaybackService() {
@@ -509,6 +522,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onStop() {
+        if (splitScroll != null) splitScroll.finish();
         getSystemService(MediaRouter.class).removeCallback(mediaRouteChanges);
         getSystemService(AudioManager.class).unregisterAudioDeviceCallback(audioDeviceChanges);
         releaseMediaController();
@@ -801,7 +815,7 @@ public class MainActivity extends BridgeActivity {
         }
         try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(destination, 65536))) {
             zip.setLevel(Deflater.BEST_COMPRESSION);
-            BackupMetadata.write(zip, metadata, "1.0.3", formatVersion);
+            BackupMetadata.write(zip, metadata, "1.0.4", formatVersion);
             byte[] buffer = new byte[65536];
             for (Map.Entry<String, File> entry : audioEntries.entrySet()) {
                 zip.putNextEntry(new ZipEntry("music/" + entry.getKey()));
@@ -1161,6 +1175,11 @@ public class MainActivity extends BridgeActivity {
 
     public class AuraSoundBridge {
         @JavascriptInterface
+        public boolean isInMultiWindow() {
+            return inMultiWindow;
+        }
+
+        @JavascriptInterface
         public String listMusicFiles() throws IOException {
             return storedMusicNames().toString();
         }
@@ -1282,6 +1301,7 @@ public class MainActivity extends BridgeActivity {
                         break;
                     case 3443508:
                         if (strOptString.equals("play")) {
+                            runOnUiThread(MainActivity.this::requestPlaybackNotifications);
                             MainActivity.this.withMediaController(new Consumer() {
                                 @Override
                                 public final void accept(Object obj) {

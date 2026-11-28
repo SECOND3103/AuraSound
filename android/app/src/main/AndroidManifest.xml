@@ -12,6 +12,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
+        <meta-data android:name="android.allow_multiple_resumed_activities" android:value="true" />
         <service
             android:name=".AuraSoundPlaybackService"
             android:exported="true"
@@ -30,6 +31,7 @@
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
             android:exported="true"
+            android:resizeableActivity="true"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
